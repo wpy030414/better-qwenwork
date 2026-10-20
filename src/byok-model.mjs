@@ -18,8 +18,12 @@ import { existsSync, mkdirSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
+import { setModelLabels, getModelLabels, reapplyFromDb, CACHE_FILE } from './dynamic-text.mjs';
 
 const PROVIDER_MARKER = process.env.QODER_BRIDGE_BYOK_PROVIDER ?? 'claude-bridge';
+// 默认标题（可被 --name 覆盖）。App 与渲染层都优先读 extraParams.displayName，
+// 所以这个值必须同时写进 display_name 与 extra_params 两处。
+const DEFAULT_TITLE = process.env.QODER_BRIDGE_BYOK_NAME ?? 'Fable 5.5';
 const DB_PATH = join(
   process.platform === 'win32' ? process.env.APPDATA : join(homedir(), 'Library', 'Application Support'),
   'QwenWorkCN', 'data', 'agents.db',
@@ -37,9 +41,15 @@ const openDb = () => {
   return new DatabaseSync(DB_PATH);
 };
 
-function add({ displayName, model, apiKey, style, url, isVl, maxInputTokens, maxOutputTokens }) {
-  if (!model) throw new Error('缺少 --model（官方 API 的模型 id，如 claude-opus-4-5）');
+function add({ displayName, model, apiKey, style, url, isVl, maxInputTokens, maxOutputTokens, subtitle }) {
+  if (!model) throw new Error('缺少 --model（claude 侧真实模型别名，如 fable / opus）');
   if (!apiKey) throw new Error('缺少 --api-key（占位值亦可：桥接路径不用它，claude 用自己的登录态）');
+  const title = displayName ?? DEFAULT_TITLE;
+  // model 列必须放**真实模型别名**（shim 会校验形态后用作 claude --model）。
+  // 显示文案走 src/dynamic-text.mjs 的本地文案表（`model.<key>.label/description`，
+  // 渲染层优先级高于下面这个兜底模板）；--subtitle 只是兜底写法：
+  // 渲染层在没有文案表键时会显示硬编码的 `${Anthropic|OpenAI} · ${model列}`。
+  const modelColumn = subtitle ?? model;
   const db = openDb();
   try {
     const key = newKey();
@@ -52,26 +62,31 @@ function add({ displayName, model, apiKey, style, url, isVl, maxInputTokens, max
       VALUES (?, 'byok', ?, ?, 'claude', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
     `).run(
       key,
-      displayName ?? 'Claude',
+      title,
       PROVIDER_MARKER,
       url ?? null,
       style ?? 'anthropic',
-      model,
+      modelColumn,
       style ?? 'anthropic',
       isVl ? 1 : 0,
       maxInputTokens ?? 200000,
       maxOutputTokens ?? 32000,
       JSON.stringify({ api_key: encodeParam(apiKey) }),
-      JSON.stringify({ displayName: displayName ?? 'Claude' }),
+      // displayName 被主进程 getDisplayName() 与渲染层 fj() 双向读取，必须与列一致
+      JSON.stringify({ displayName: title, ...(subtitle ? { claudeModel: model } : {}) }),
       now, now,
     );
-    console.log(`已写入 Claude 档位`);
+    console.log(`已写入档位`);
     console.log(`  key          = ${key}`);
-    console.log(`  display_name = ${displayName ?? 'Claude'}`);
+    console.log(`  标题         = ${title}`);
+    console.log(`  副标题       = ${style === 'openai' ? 'OpenAI' : 'Anthropic'} · ${modelColumn}`);
     console.log(`  provider     = ${PROVIDER_MARKER}   ← shim 的路由哨兵，勿改`);
-    console.log(`  style/format = ${style ?? 'anthropic'}`);
-    console.log(`  model        = ${model}`);
-    console.log(`\n重启千问办公后，下拉框的「我的模型」分组里应出现该条目。`);
+    console.log(`  claude 模型  = ${model}`);
+    if (subtitle) {
+      console.log(`\nmodel 列已被用作副标题文案，真实模型须由环境变量指定：`);
+      console.log(`  pnpm apply --claude-model ${model}`);
+    }
+    console.log(`\n重启千问办公后，下拉框的自定义分组里应出现该条目。`);
     return key;
   } finally { db.close(); }
 }
@@ -110,6 +125,47 @@ function removeOurs() {
   } finally { db.close(); }
 }
 
+// 改现有行的显示字段：**不换 key**，这样 App 的 modelLevel（用户已选中的档位）继续有效。
+function edit(key, { displayName, model, subtitle }) {
+  if (!key) throw new Error('缺少 --key');
+  const db = openDb();
+  try {
+    const row = db.prepare('select key, display_name, model, extra_params from byok_custom_models where key = ?').get(key);
+    if (!row) throw new Error(`未找到 ${key}`);
+    const title = displayName ?? row.display_name;
+    // subtitle 给了就写进 model 列（渲染层副标题 = `${Anthropic|OpenAI} · <model列>`），
+    // 真实模型改由 extra_params.claudeModel + QODER_BRIDGE_MODEL 提供
+    const modelColumn = subtitle ?? model ?? row.model;
+    let extra = {};
+    try { extra = JSON.parse(row.extra_params || '{}'); } catch {}
+    db.prepare('update byok_custom_models set display_name=?, model=?, extra_params=?, updated_at=? where key=?')
+      .run(title, modelColumn,
+        JSON.stringify({ ...extra, displayName: title, ...(subtitle ? { claudeModel: model ?? extra.claudeModel } : { claudeModel: undefined }) }),
+        Date.now(), key);
+    console.log(`已更新 ${key}`);
+    console.log(`  标题   = ${title}`);
+    console.log(`  副标题 = Anthropic · ${modelColumn}`);
+    console.log(`  真实模型 = ${subtitle ? (model ?? extra.claudeModel ?? '(需 QODER_BRIDGE_MODEL)') : modelColumn}`);
+  } finally { db.close(); }
+}
+
+// 把期望的显示文案记进 extra_params（App 只原样读出、不解释自定义键，安全）。
+// 云端刷新会整体覆盖本地文案缓存，这份"意图源"用于 pnpm model labels --from-db 恢复。
+function rememberIntent(key, { label, description }) {
+  const db = openDb();
+  try {
+    const row = db.prepare('select extra_params from byok_custom_models where key = ?').get(key);
+    if (!row) throw new Error(`未找到 ${key}（文案已写入缓存，但没有 DB 行可记意图）`);
+    let extra = {};
+    try { extra = JSON.parse(row.extra_params || '{}'); } catch {}
+    if (label != null) extra.label = label;
+    if (description != null) extra.description = description;
+    db.prepare('update byok_custom_models set extra_params = ?, updated_at = ? where key = ?')
+      .run(JSON.stringify(extra), Date.now(), key);
+    return extra;
+  } finally { db.close(); }
+}
+
 function parseFlags(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i++) {
@@ -137,7 +193,34 @@ try {
       maxOutputTokens: f['max-output'] ? Number(f['max-output']) : undefined,
     });
   } else if (cmd === 'list') list();
-  else if (cmd === 'rm') remove(f.key ?? rest[0]);
+  else if (cmd === 'edit') edit(f.key ?? rest[0], {
+    displayName: f.displayName ?? f.name,
+    model: f.model,
+    subtitle: f.subtitle,
+  });
+  else if (cmd === 'labels') {
+    // 期望文案写进本地文案缓存；同时记进 DB 行的 extra_params 作为**意图源**，
+    // 因为 App 会周期性用云端数据整体覆盖该缓存文件（见 src/dynamic-text.mjs）。
+    const key = f.key ?? rest[0];
+    const label = f.label ?? f.name;
+    const description = f.description ?? f.subtitle;
+    if (f['from-db']) {
+      const done = reapplyFromDb(DB_PATH);
+      console.log(`从 DB 意图源重放 ${done.length} 条文案到 ${CACHE_FILE}`);
+      for (const d of done) console.log(`  ${d.key} → 标题=${d.label} 副标题=${d.description}`);
+    } else {
+      if (!key) throw new Error('缺少 --key（或用 --from-db 重放全部）');
+      if (label == null && description == null) throw new Error('至少给 --label 或 --description');
+      const r = setModelLabels(key, { label, description });
+      rememberIntent(key, { label, description });
+      console.log(`已写入本地文案缓存 ${CACHE_FILE}`);
+      console.log(`  键      = ${r.touched.join(', ')}`);
+      console.log(`  version = ${r.version}（刷新前 updatedAt=${r.updatedAtBefore}）`);
+      console.log(`  意图已记入 DB 行 extra_params，云端覆盖后用：pnpm model labels --from-db`);
+    }
+  } else if (cmd === 'show-labels') {
+    console.log(JSON.stringify(getModelLabels(f.key ?? rest[0]), null, 2));
+  } else if (cmd === 'rm') remove(f.key ?? rest[0]);
   else if (cmd === 'prune') removeOurs();
   else {
     console.log('用法:');

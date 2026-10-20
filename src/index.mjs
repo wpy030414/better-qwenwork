@@ -27,6 +27,9 @@ const ENV_NAMES = ['QODER_CLI_PATH', 'QODERCLI_PATH'];
 // 本机账号 allow_byok=0（企业基础版），故必须靠 env 短路。值接受 1/true/yes/on。
 // 它只打开「显示/允许 BYOK」这一道门，不改变官方档位（flash/pro）的任何行为。
 const GATE_ENV = { name: 'ALLOW_CUSTOM_BYOK', value: '1' };
+// 可选追加项：pnpm apply --claude-model <别名> 时注册 QODER_BRIDGE_MODEL
+// （BYOK 的 model 列被用作副标题文案后，真实模型只能靠这个变量指定）
+const EXTRA_ENV = [];
 
 // ---------- Windows 实现 ----------
 
@@ -161,13 +164,24 @@ const broadcastChange = () => {
 
 // ---------- 命令 ----------
 
-// 要注册的变量全集：shim 劫持点（值 = shim 路径）+ BYOK 显示门（值 = '1'）
+// 要注册的变量全集：shim 劫持点（值 = shim 路径）+ BYOK 显示门（值 = '1'）+ 本次可选项
 const entries = () => [
   ...ENV_NAMES.map((name) => ({ name, value: SHIM_PATH })),
   { name: GATE_ENV.name, value: GATE_ENV.value },
+  ...EXTRA_ENV,
 ];
 
-const apply = () => {
+// 撤销全集：还要扫掉**历史**注册过的可选项。新进程里 EXTRA_ENV 恒为空，
+// 不显式列出就会漏删上次 apply 写进去的 QODER_BRIDGE_MODEL。
+const OPTIONAL_ENV_NAMES = ['QODER_BRIDGE_MODEL'];
+const removalEntries = () => [
+  ...entries(),
+  ...OPTIONAL_ENV_NAMES
+    .filter((name) => !entries().some((e) => e.name === name))
+    .map((name) => ({ name })),
+];
+
+const apply = async () => {
   const list = entries();
   if (OS === 'win32') {
     for (const { name, value } of list) {
@@ -192,7 +206,8 @@ const apply = () => {
   for (const { name, value } of list) console.log(`  ${name}=${value}`);
   console.log(`\n${GATE_ENV.name} 是千问办公官方的 BYOK 开关（hasCustomByokEnvOverride），`);
   console.log('只影响「自定义模型」是否可见可选，不改变官方 flash/pro 档位的任何行为。');
-  console.log('下一步：pnpm model add --model <claude 模型 id> --api-key placeholder');
+  await reapplyLabels();
+  console.log('下一步：pnpm model add --model <claude 模型别名> --api-key placeholder');
   if (OS === 'win32') {
     console.log('重启千问办公即可生效。');
   } else {
@@ -200,9 +215,35 @@ const apply = () => {
   }
 };
 
+// 自定义标题/副标题存在千问办公的本地文案缓存里，而 App 会周期性用云端数据整体覆盖
+// 那个文件。期望文案记在 byok_custom_models.extra_params，所以每次 apply 顺手重放一次。
+// 动态 import + try 包住全部失败面：dynamic-text.mjs 依赖 node:sqlite（Node 22+），
+// 若静态引入，老版本 Node 会让**整个 pnpm apply 崩掉**——而 apply 的本职只是注册环境变量，
+// 文案重放只是锦上添花，绝不能拖垮主流程。首次安装时缓存文件还不存在，同属正常跳过。
+// Linux 下 Electron 默认 userData = ~/.config/<app name>，故根目录已含 QwenWorkCN，不再拼接。
+const APP_DATA_ROOT = OS === 'win32' ? join(process.env.APPDATA ?? '', 'QwenWorkCN')
+  : OS === 'darwin' ? join(homedir(), 'Library', 'Application Support', 'QwenWorkCN')
+  : join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'QwenWorkCN');
+const AGENTS_DB = join(APP_DATA_ROOT, 'data', 'agents.db');
+async function reapplyLabels() {
+  try {
+    const { reapplyFromDb } = await import('./dynamic-text.mjs');
+    const done = reapplyFromDb(AGENTS_DB);
+    if (done.length) {
+      console.log(`已重放档位文案 ${done.length} 条：`);
+      for (const d of done) console.log(`  ${d.key} → ${d.label ?? '(默认)'}${d.description ? ` / ${d.description}` : ''}`);
+    }
+  } catch (e) {
+    const first = String(e?.message ?? e).split('\n')[0];
+    if (/缓存不存在|数据库不存在|Unknown module|node:sqlite|is not supported/i.test(first)) {
+      console.log(`（档位文案未重放：启动过一次千问办公、且 Node ≥ 22 后再跑 pnpm apply 即可）`);
+    } else console.warn(`警告：档位文案重放失败 —— ${first}`);
+  }
+}
+
 const unapply = () => {
   let removed = 0;
-  const list = entries();
+  const list = removalEntries();
   if (OS === 'win32') {
     for (const { name } of list) {
       if (getCurrentValue(name)) {
@@ -228,11 +269,19 @@ const unapply = () => {
 };
 
 const cmd = process.argv[2];
-if (cmd === 'apply') apply();
-else if (cmd === 'unapply') unapply();
+// pnpm apply --claude-model fable[1m]
+//   额外注册 QODER_BRIDGE_MODEL：当 BYOK 的 model 列被用作副标题文案时，
+//   真实 claude 模型只能由这个变量提供（见 src/byok-model.mjs 的 subtitle 说明）。
+const extraArgs = process.argv.slice(3);
+if (cmd === 'apply') {
+  const m = extraArgs.find((a) => a.startsWith('--claude-model')) ?? null;
+  const modelVal = m ? (m.includes('=') ? m.split('=')[1] : extraArgs[extraArgs.indexOf(m) + 1]) : null;
+  if (modelVal) EXTRA_ENV.push({ name: 'QODER_BRIDGE_MODEL', value: modelVal });
+  await apply();
+} else if (cmd === 'unapply') unapply();
 else {
   console.log('用法:');
-  console.log('  pnpm apply    注册 QODER_CLI_PATH + QODERCLI_PATH → 千问办公走 Claude Code');
-  console.log('  pnpm unapply  撤销两个变量 → 恢复原引擎');
+  console.log('  pnpm apply [--claude-model <claude 模型别名>]  注册挂点 + BYOK 开关');
+  console.log('  pnpm unapply  撤销全部变量 → 恢复原引擎');
   console.log(`\n当前平台: ${OS}（${OS === 'win32' ? 'Windows 注册表' : 'macOS LaunchAgent'}）`);
 }

@@ -59,6 +59,11 @@ function startShim(argv, opts = {}) {
     QODERCLI_PATH: SHIM,
     ...opts.extraEnv,
   };
+  // 密封性：QODER_BRIDGE_MODEL 会被 pnpm apply --claude-model 注册进注册表，
+  // 一旦泄漏进测试进程，FORCE_MODEL 分支会往 claudeArgs 里加 --model，
+  // 让「非法模型名被丢弃」这类断言假性通过或假性失败。需要它的用例自己经 extraEnv 给。
+  if (opts.forceModel === undefined) delete env.QODER_BRIDGE_MODEL;
+  else env.QODER_BRIDGE_MODEL = opts.forceModel;
   for (const k of Object.keys(env)) if (env[k] === undefined) delete env[k];
   const c = spawn(process.execPath, [SHIM, ...argv], {
     cwd: HERE, stdio: ['pipe', 'pipe', 'pipe'], env,
@@ -270,7 +275,38 @@ async function t7_bridge_when_no_native() {
   rmSync(workdir, { recursive: true, force: true });
 }
 
-for (const t of [t1_internal_passthrough, t2_official_by_model, t3_claude_by_probe, t4_official_by_probe, t5_probe_timeout, t6_exit_41, t7_bridge_when_no_native]) {
+// ---------- T8 非常规模型名守卫（副标题借道 model 列的场景）----------
+async function t8_model_name_guard() {
+  console.log('\n===== 8. 探测回来非常规模型名（中文文案）→ 丢弃，不毁掉 claude 启动 =====');
+  // 必须保留 native：否则走的是「无原生 CLI」直连桥接分支，根本不会探测
+  const s = startShim(CLAUDE_ARGV, { claude: MOCK_CLAUDE });
+  const probe = await s.next((m) => m.type === 'control_request' && (m.request?.subtype ?? m.request?.type) === 'get_model_policy');
+  ok(probe !== null, '发出探测');
+  // App 会把 BYOK 的 model 列原样回传；该列可能被用作副标题文案（含中文/空格），
+  // 直接喂给 claude 的 --model 会启动失败
+  s.child.stdin.write(ctrlResp(probe.request_id, {
+    model: '最强模型，世界最强模型',
+    custom_model: { provider: 'claude-bridge', model: '最强模型，世界最强模型', style: 'anthropic' },
+  }));
+  s.child.stdin.write(ctrlReq('g-init', { type: 'initialize', subtype: 'initialize' }));
+  s.child.stdin.write(userMsg('bbbbbbbb-1111-2222-3333-444455556666', 'hi'));
+  const sysInit = await s.next((m) => m.type === 'system' && m.subtype === 'init');
+  ok(!!sysInit, 'claude 仍成功启动（非法模型名未导致启动失败）');
+  const a = sysInit?._argv ?? [];
+  const mIdx = a.indexOf('--model');
+  ok(mIdx < 0, `非法模型名被丢弃，未写入 --model（got ${mIdx < 0 ? '(none)' : a[mIdx + 1]})`);
+  // mock-claude 会先发 can_use_tool 等宿主应答；不应答它会走 15s 超时兜底，
+  // 超出本用例等待窗口（那是测试时序，不是产品缺陷）
+  const canUse = await s.next((m) => m.type === 'control_request' && m.request?.subtype === 'can_use_tool');
+  if (canUse) {
+    s.child.stdin.write(JSON.stringify({ type: 'control_response', response: { subtype: 'success', request_id: canUse.request_id, response: { behavior: 'allow', updatedInput: canUse.request.input } } }) + '\n');
+  }
+  const result = await s.next((m) => m.type === 'result');
+  ok(result?.result === 'MOCK_DONE', '轮次仍跑通');
+  await s.finish();
+}
+
+for (const t of [t1_internal_passthrough, t2_official_by_model, t3_claude_by_probe, t4_official_by_probe, t5_probe_timeout, t6_exit_41, t7_bridge_when_no_native, t8_model_name_guard]) {
   await t();
 }
 console.log(`\n===== 结果: ${failures === 0 ? '全部通过' : failures + ' 项失败'} =====`);

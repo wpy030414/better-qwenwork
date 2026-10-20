@@ -713,10 +713,20 @@ function detachStdin() {
   try { process.stdin.destroy(); } catch {}
 }
 
+// 探测回来的模型名未必真是模型名：App 把 BYOK 的 model 列原样回传，而那一列可能被
+// 本项目用作副标题文案（渲染层副标题 = `${Anthropic|OpenAI} · <model列>`，无独立字段）。
+// 非 ASCII 或含空格的值喂给 claude 的 --model 会直接启动失败，故只接受模型名形态，
+// 其余一律丢弃并回退到 FORCE_MODEL / claude 自身默认。
+const CLAUDE_MODEL_RE = /^[A-Za-z0-9._[\]:\/-]{1,64}$/;
+const safeClaudeModel = (name) => (typeof name === 'string' && CLAUDE_MODEL_RE.test(name) ? name : null);
+
 function attachClaude(modelFromProbe) {
-  if (modelFromProbe && !FORCE_MODEL) {
-    parsed.claudeArgs.push('--model', modelFromProbe);
-    log('PROBE-MODEL', `--model ${modelFromProbe}`);
+  const m = safeClaudeModel(modelFromProbe);
+  if (m && !FORCE_MODEL) {
+    parsed.claudeArgs.push('--model', m);
+    log('PROBE-MODEL', `--model ${m}`);
+  } else if (modelFromProbe && !m) {
+    log('PROBE-MODEL-SKIP', `非常规模型名，丢弃：${JSON.stringify(String(modelFromProbe).slice(0, 40))}`);
   }
   runSession(parsed, sink);
   const fed = prelude.splice(0);
