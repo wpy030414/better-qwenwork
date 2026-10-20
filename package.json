@@ -4,6 +4,15 @@
   "type": "module",
   "scripts": {
     "apply": "node src/index.mjs apply",
-    "unapply": "node src/index.mjs unapply"
+    "unapply": "node src/index.mjs unapply",
+    "model": "node src/byok-model.mjs",
+    "test": "node src/bridge-shim.test.mjs",
+    "e2e": "npm run test && npm run e2e:native && npm run e2e:sdk",
+    "e2e:native": "node e2e-diff.mjs",
+    "e2e:sdk": "node e2e-sdk.mjs",
+    "e2e:real": "node e2e-real.mjs"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1"
   }
 }

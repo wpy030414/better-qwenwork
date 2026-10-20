@@ -19,6 +19,14 @@ const SHIM_PATH = OS === 'win32'
 // SDK 内核 (resolveExecutable) 读 QODERCLI_PATH（无下划线）。
 // 两者必须同时注册，否则 shim 不会被调用。
 const ENV_NAMES = ['QODER_CLI_PATH', 'QODERCLI_PATH'];
+// 共存方案的第二个挂点：千问办公下拉框要显示「Claude」档位，需要 allowCustomBYOK 为真。
+// App 判定（main.js hasCustomByokEnvOverride）：
+//   isTruthyEnv(process.env.ALLOW_CUSTOM_BYOK) || isTruthyEnv(process.env.ALLOW_BYOK)
+//     || isTruthyEnv(loadQoderDotEnv().ALLOW_CUSTOM_BYOK) || …
+//     || 账号 allowBYOK >= 2
+// 本机账号 allow_byok=0（企业基础版），故必须靠 env 短路。值接受 1/true/yes/on。
+// 它只打开「显示/允许 BYOK」这一道门，不改变官方档位（flash/pro）的任何行为。
+const GATE_ENV = { name: 'ALLOW_CUSTOM_BYOK', value: '1' };
 
 // ---------- Windows 实现 ----------
 
@@ -86,9 +94,9 @@ const macGetEnvValue = (name) => {
 };
 
 // 即时生效：launchctl setenv 只对之后启动的进程生效（已运行的千问办公需重启）
-const macSetEnvNow = (name) => {
-  // 值用单引号包裹防 shell 转义（路径中不含单引号）
-  execSync(`launchctl setenv ${name} '${SHIM_PATH}'`, { stdio: 'inherit' });
+const macSetEnvNow = (name, value) => {
+  // 值用单引号包裹防 shell 转义（路径与 '1' 均不含单引号）
+  execSync(`launchctl setenv ${name} '${value}'`, { stdio: 'inherit' });
 };
 
 const macUnsetEnvNow = (name) => {
@@ -102,7 +110,8 @@ const macUnsetEnvNow = (name) => {
 // 登录时自动注入：plist RunAtLoad 执行 /bin/launchctl setenv，支持一次传多对 key value
 const macWritePlist = () => {
   mkdirSync(dirname(macPlistPath()), { recursive: true });
-  const args = ['setenv', ...ENV_NAMES.flatMap((name) => [name, SHIM_PATH])]
+  // entries() 在 macWritePlist 之后定义，运行时已初始化（const 声明顺序只影响 TDZ，不影响调用期）
+  const args = ['setenv', ...entries().flatMap(({ name, value }) => [name, value])]
     .map((a) => `    <string>${xmlEscape(a)}</string>`)
     .join('\n');
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -152,16 +161,23 @@ const broadcastChange = () => {
 
 // ---------- 命令 ----------
 
+// 要注册的变量全集：shim 劫持点（值 = shim 路径）+ BYOK 显示门（值 = '1'）
+const entries = () => [
+  ...ENV_NAMES.map((name) => ({ name, value: SHIM_PATH })),
+  { name: GATE_ENV.name, value: GATE_ENV.value },
+];
+
 const apply = () => {
+  const list = entries();
   if (OS === 'win32') {
-    for (const name of ENV_NAMES) {
+    for (const { name, value } of list) {
       const existing = getCurrentValue(name);
-      if (existing === SHIM_PATH) {
-        console.log(`值未变，覆盖写入: ${name}=${SHIM_PATH}`);
+      if (existing === value) {
+        console.log(`值未变，覆盖写入: ${name}=${value}`);
       } else if (existing) {
-        console.log(`替换旧值: ${name}\n  旧: ${existing}\n  新: ${SHIM_PATH}`);
+        console.log(`替换旧值: ${name}\n  旧: ${existing}\n  新: ${value}`);
       }
-      setEnv(name, SHIM_PATH);
+      setEnv(name, value);
     }
   } else {
     const existing = macGetEnvValue(ENV_NAMES[0]) || macGetEnvValue(ENV_NAMES[1]);
@@ -169,11 +185,14 @@ const apply = () => {
       console.log(`替换旧值: ${existing}\n  新: ${SHIM_PATH}`);
     }
     macWritePlist();
-    for (const name of ENV_NAMES) macSetEnvNow(name);
+    for (const { name, value } of list) macSetEnvNow(name, value);
   }
   broadcastChange();
   console.log(`\n已注册（${OS === 'win32' ? 'Windows 注册表' : 'macOS LaunchAgent'}）:`);
-  for (const name of ENV_NAMES) console.log(`  ${name}=${SHIM_PATH}`);
+  for (const { name, value } of list) console.log(`  ${name}=${value}`);
+  console.log(`\n${GATE_ENV.name} 是千问办公官方的 BYOK 开关（hasCustomByokEnvOverride），`);
+  console.log('只影响「自定义模型」是否可见可选，不改变官方 flash/pro 档位的任何行为。');
+  console.log('下一步：pnpm model add --model <claude 模型 id> --api-key placeholder');
   if (OS === 'win32') {
     console.log('重启千问办公即可生效。');
   } else {
@@ -183,8 +202,9 @@ const apply = () => {
 
 const unapply = () => {
   let removed = 0;
+  const list = entries();
   if (OS === 'win32') {
-    for (const name of ENV_NAMES) {
+    for (const { name } of list) {
       if (getCurrentValue(name)) {
         delEnv(name);
         removed++;
@@ -192,7 +212,7 @@ const unapply = () => {
     }
   } else {
     if (macDeletePlist()) removed++;
-    for (const name of ENV_NAMES) {
+    for (const { name } of list) {
       if (macGetEnvValue(name)) {
         macUnsetEnvNow(name);
         removed++;

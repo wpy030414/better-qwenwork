@@ -13,11 +13,16 @@
 
 ## 当前悬置问题（两份记录共同指向）
 
-1. 10/16 那次「联调成功」中，UI 下拉里的 `Claude` 选项由哪一层渲染：`get_models` 应答、`initialize.models`，还是会话级旁路显示。决定共存方案挂在 `QODER_CLI_PATH` 还是 `ENGINE_LOCAL_MANIFEST`。
-2. 当前账号（企业基础版）与 `qwork` scene 下，是否存在 `harness = cc/qo` 的可选档位。模型目录缓存为加密 blob，无法静态判读，只能实测。
-3. 桥接历史上是否**真的**接管过主对话：`~/.qwenwork-bridge/ledger.jsonl` 不存在、`~/.claude/projects/` 无 app workspace 会话，两条间接证据都指向否定，缺一次干净的端到端复现。
+> 2026-10-20 实现后复盘：以下三条**全部已有结论**，保留原文以便日后复核时对照。
 
-## 一次能定死上述 1、3 的现场测试
+1. ~~10/16 那次「联调成功」中，UI 下拉里的 `Claude` 选项由哪一层渲染~~
+   **已定论**：与我们的注入无关。下拉 = 云端 `chat-modes`（官方档位）∪ 本地 `byok_custom_models`（自定义档位），渲染层由 `allowCustomBYOK` 单门控制显示。共存挂在 `QODER_CLI_PATH` 即可，**不需要** `ENGINE_LOCAL_MANIFEST`。
+2. ~~当前账号（企业基础版）与 `qwork` scene 下，是否存在 `harness = cc/qo` 的可选档位~~
+   **已定论（绕开该问题）**：本机账号确实没有 cc/qo 档位，但 BYOK 条目被 App 硬编码 `harness="qoder-cli"`，且 `isMissingCatalogModel()` 对 `byok-` 前缀豁免——不依赖云端是否给档位。真机实测 `modelCount:3, customModelCount:1` 并存，且把 `modelLevel` 直接设为 `byok-...` 后 App 无 `model_route_missing` / 无回退。
+3. ~~桥接历史上是否**真的**接管过主对话~~
+   **已定论（否定）**：`~/.claude/projects/` 无 app workspace 会话、`ledger.jsonl` 缺失、`agents.db` 路由记录 100% 是 `opencode`。当时看到的「Claude 可用」是 `get_models`/`initialize.models` 的旁路显示效果，不是执行接管。
+
+## 一次能定死上述 1、3 的现场测试（已执行）
 
 保持 `QODER_CLI_PATH` 已注册状态，在千问办公里发一条消息，然后：
 
@@ -28,3 +33,10 @@ grep -l 'USER-IN\|--session-id' src/logs/*.log
 
 命中 → 主对话仍在 CLI 链路上，透传方案（原目标）重新成立。
 不命中 → 主对话彻底走 ACP，必须换挂点，原 `QODER_CLI_PATH` 方案的文档与决策需要整体重写。
+
+**实测结果（2026-10-20，v3 实现后）**：不命中——`src/logs/` 里出现的都是
+`--bare` 内部查询与被 `--model` 标记的档位解析，主对话文本从未进入 shim。
+按原判据应走「换挂点」，但实际解法是**反向的**：主对话走 ACP 意味着官方模型
+本来就完好共存，缺的只是一条可选的 Claude 通道，而 BYOK 表正是 App 自己提供的
+那条 `qoder-cli` 通道。因此 `ENGINE_LOCAL_MANIFEST` + 自实现 ACP 服务端被否决（见
+`docs/DECISIONS.md` D16 的替代方案清单）。

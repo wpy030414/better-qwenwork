@@ -186,3 +186,27 @@
   - spawn 异常捕获：`try/catch` 包裹 `spawn()`，失败时记 `SPAWN-FAIL` + `SPAWN-DEBUG` 并输出 stderr 摘要。
 - **影响**：任何未捕获异常、spawn 失败、子进程 stderr 均可追溯；正常路径不受影响。
 - **何时重新考虑**：日志文件过大（当前按 pid+ts 分文件，单次运行一个文件，无轮转需求）。
+
+## D15：共存路由——默认透传官方 CLI，仅 Claude 档位改道（v3 方针）
+
+- **问题**：v2 假设「shim 接管一切、所有查询都翻译成 claude」。1.3.x 取证（`docs/researches/2026-10-20-engine-harness-routing.md`）证明该前提失效：主对话已按 `execution.harness` 分流到 ACP 引擎，`QODER_CLI_PATH` 只能接到 `--bare` 内部查询。v2 于是**只破坏官方链路（自答吃掉意图分类/标题生成/闲置建议）、不产出任何 Claude 价值**，净收益为负。主人要求改为官方模型与 Claude 共存。
+- **方案**：反转默认。shim 三分支：
+  - `passthrough`（默认）：`spawn` 官方 `qoderclicn.exe`，argv 原样、帧原样、退出码原样，spawn 前删 `QODER_CLI_PATH`/`QODERCLI_PATH` 防递归，保留三个 `QODER_AGENT_SDK_*`（否则官方 CLI 报 `sdk_invalid_args`）。
+  - `claude`：走 v2 的翻译桥接（保留其全部修正）。
+  - `probe`：无 `--model` 且非内部查询时，主动向宿主发 `get_model_policy` 控制帧，读应答 `custom_model.provider` 是否等于哨兵 `claude-bridge`。
+  判据方向性：「有 `--model`」是官方档位的**充分**条件（App 对 BYOK 硬排除），「无 `--model`」是歧义的，必须探测。探测超时/异常一律保守透传。
+- **共存的分工不由 shim 承担**：App 对 BYOK 条目硬编码 `harness:"qoder-cli"`（`resolveLocalByokModelRoute`），官方 flash/pro 走 ACP 引擎根本不 spawn CLI。分流是 App 自身行为，Claude 档位与官方档位天然互不干扰。
+- **影响**：官方模型 100% 走官方服务（差分 E2E 证明装了 shim 与没装逐帧同构、退出码一致）；Claude 只有在用户主动选中「Claude」档位时才生效。
+- **何时重新考虑**：App 取消 `QODER_CLI_PATH` 挂点；或官方档位改为也走 SDK→CLI（届时 `--model` 判据需重新核对）。
+
+## D16：Claude 档位用 BYOK 表供给，`ALLOW_CUSTOM_BYOK` env 开门
+
+- **问题**：要让 Claude 出现在千问办公下拉里可被选中。模型目录来自云端 HTTP（`/api/desktop/chat-modes`），本地无法插条目；改 `app.asar` 是项目硬约束禁止项；`catalogSource="qodercli"` 策略由云端 runtime policy 决定且本地无 env 覆盖。
+- **方案**：用 App 自己的 BYOK 机制。`byok_custom_models` 表由 `listByokCustomModels()` 无条件读取并作为 `customModels` 与云端 `models` 并列返回；下拉可见性只由一个布尔 `allowCustomBYOK` 控制，其判定为
+  `hasCustomByokEnvOverride() || 账号 allowBYOK >= 2`，
+  前者读 `process.env` / `~/.qwenworkcn/.env` 的 `ALLOW_CUSTOM_BYOK`/`ALLOW_BYOK`。本机账号 `allow_byok=0`，故走 env 短路（`pnpm apply` 已一并注册）。
+  `src/byok-model.mjs` 负责写表：`provider` 固定哨兵 `claude-bridge`（即 D15 的路由判据），`encrypted_parameters` 用 App 官方支持的 `{encoding:"plainBase64"}` 分支，零第三方依赖（node 22+ 内置 `node:sqlite`）。
+- **否决的替代方案**：`ENGINE_LOCAL_MANIFEST` 自制 manifest + 实现整套 ACP 服务端——工程量大一个数量级，且在 BYOK 路线可行后无必要；BYOK 的 `url` 指向本地反代——依赖额外进程且要处理鉴权形态；LOCAL_INFERENCE 通道——限死 `openai-chat` + 无凭据回环，与 Claude 的 OAuth 登录态不匹配。
+- **影响**：不碰 `app.asar`、不碰 UI、不绕付费墙；撤销只需 `pnpm unapply` + `pnpm model prune`。
+- **风险**：`style/format` 词表与 `custom_model` 校验规则取自二进制字符串与推断，UI 实测是唯一权威判据（见 ARCHITECTURE「已知风险」）。
+- **何时重新考虑**：账号 `allowBYOK >= 2`（则 env 开关可省）；或 App 加入官方「自定义 provider」白名单机制。

@@ -150,5 +150,39 @@ App 对每个 subChat 只持**一个** `sessionId`（`crypto.randomUUID()`），
 
 1. §五 的 env 差集取值未独立复核（二手）。
 2. `fetch_service_account_token`、`resolve_session_artifacts`、`host_action`、`elicitation_requested`、`memory_*`、`skill_evolution_*` 等帧在透传下是否真能裸管通过——只验证了它们存在于 CLI 字符串中。
-3. 共存后 App 侧 `sessionModelRouteService` 是否会拒绝一个它目录里没有的 `modeKey`（Claude 条目要能被选中，得先过目录校验）。这决定了共存方案最终是否必须同时给目录供一个条目——与主文档 §五 的「下拉来源」待验证项是同一个问题。
+3. ~~共存后 App 侧 `sessionModelRouteService` 是否会拒绝一个它目录里没有的 `modeKey`~~
+   **已定论（实现 E2E）**：不会拒绝。`isMissingCatalogModel()` 对 `byok-` 前缀显式豁免，
+   且 BYOK 走 `resolveLocalByokModelRoute()`（硬编码 `harness:"qoder-cli"`）；
+   下拉可见性由 `allowCustomBYOK` 单一门控制，可用 `ALLOW_CUSTOM_BYOK` env 短路开启。
+   ⇒ **共存必须给目录供一个条目，而条目来源就是本地 `byok_custom_models` 表，不需改 App。**
 4. daemon 通道另有一套版本空间（`daemon_protocol_version` 必须是整数 `2`），与 stream-json 的 `"1.5.0"` 无关；若日后复用 daemon 别混淆。
+
+## 实现后的新发现（2026-10-20 补记）
+
+`get_model_policy` 是**唯一可靠的路由信号**，且方向与直觉相反——不是宿主推给 CLI，而是 CLI 主动拉：
+
+```
+CLI(=shim) ──control_request{type:get_model_policy,purpose,turnIndex}──▶ SDK
+            ◀──{model, custom_model:{provider,api_key,model,url,style}}──┘
+```
+
+SDK 侧序列化逻辑（`index.js` 内 `case"get_model_policy"`）：
+
+```js
+let l = m?.model;
+if (typeof l == "string") p.model = l;
+else if (l !== void 0) { let {model:g, ...S} = l; p.model = g; p.custom_model = {...S, style: S.style ?? "openai"} }
+```
+
+即 App 的 `resolveModel` 返回字符串 ⇒ 官方档；返回对象 ⇒ BYOK 档并带 `custom_model`。
+实测真实 SDK 1.0.53 会认下 shim 主动发的这条探测帧并回调宿主的 `resolveModel`
+（`e2e-sdk.mjs`：`resolveModel` 收到 `{purpose:"main", turnIndex:0, availableModels:[]}`）。
+
+两个实现期踩到的真坑（均为 shim 侧必修）：
+
+- **auth payload 文件是一次性的**：官方 CLI 在 transport close 时删除
+  `QODER_SDK_AUTH_PAYLOAD_FILE` 指向的文件（`.analysis/probe-authpayload.mjs` 实测
+  run 后 `exists=false`）。任何「先直连再透传」的差分测试若共用一份 payload，第二次必然
+  `job_token_unavailable` → 41，看起来像 shim 缺陷实则不是。
+- **子进程退出后必须主动收尾 stdin**：官方 CLI 退出后若 shim 仍持有 readline，事件循环不结束，
+  SDK 随后发来 SIGTERM，退出码就从 41 变成 143——认证过期信号被吞。

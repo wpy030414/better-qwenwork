@@ -13,8 +13,30 @@
 | `QODER_CLI_PATH` 挂点本身仍然生效 | 成立 | 确证（现场日志） |
 | 桥接开启时，shim 只收到 `--bare` 内部查询并以合成应答吃掉 | 成立 | 确证（现场日志） |
 | 这不是 1.3.2 的回归，1.3.1 已同构 | 成立 | 较强（静态标志比对，方法学有局限） |
-| 共存 + 官方透传的正确挂点是 `ENGINE_LOCAL_MANIFEST` | 高可信推断 | 未做端到端验证 |
-| UI 下拉里的 `Claude` 来自 `initialize.models` 旁路显示 | 未定 | 调查中断，待验证 |
+| 共存 + 官方透传的正确挂点是 `ENGINE_LOCAL_MANIFEST` | **已被推翻** | 见 §五：BYOK 档位 + 现有 `QODER_CLI_PATH` 即可，无需 ACP |
+| UI 下拉里的 `Claude` 来自 `initialize.models` 旁路显示 | **已定论** | 与注入无关；官方档位来自云端 chat-modes，自定义档位来自 `byok_custom_models` 表 |
+
+## 补记（同日实现验证后追加）
+
+本轮 §五 的两个悬置问题在实现 E2E 中一并定死，并推翻两处原结论：
+
+1. **「BYOK 路径已排除」是错的**。原判定只看账号 `allow_byok=0`，漏了 App 自己的 env 短路：
+   `hasCustomByokEnvOverride()` 读 `process.env` 或 `~/.qwenworkcn/.env` 的
+   `ALLOW_CUSTOM_BYOK` / `ALLOW_BYOK`（值 ∈ 1/true/yes/on）。真机实测：写入 `.env` 并重启后
+   `main.log` 由 `envAllowsCustomByok:false, allowCustomBYOK:false` 变为
+   `allowBYOK:0, envAllowsCustomByok:true, allowCustomBYOK:true`——账号权限位被绕过且不改官方行为。
+2. **共存不需要 ACP 挂点**。App 的 `resolveLocalByokModelRoute()` 对 BYOK 条目硬编码
+   `harness:"qoder-cli"`，且 `isMissingCatalogModel()` 显式豁免 `byok-` 前缀的目录校验；
+   同时 `resolveNewSessionModelRoute()` 的 BYOK 分支在 `multiCliEnabled` 判定**之前**。
+   因此 Claude 档位必然落进 SDK→CLI 链路（正是 `QODER_CLI_PATH` 劫持的那条），
+   而官方 flash/pro 继续走 ACP 引擎——**分流由 App 自身完成，共存是既有架构的自然结果**。
+   实测目录读取：`getQoderWorkModels() completed {modelCount:3, customModelCount:1, fetchStatus:"success"}`。
+3. **`--model` 只能作单向充分判据，不能作必要判据**。`buildMainSessionRuntimeExtraArgs` 的条件是
+   `model && !omitModel && !hasByokCustomModel(model)`，其中 `omitModel = modelId !== modeKey`
+   对官方档位也可能成立 ⇒
+   - 「有 `--model`」⇒ **必为官方档位**（BYOK 被 `hasByokCustomModel` 硬排除），可直接透传，省一次往返；
+   - 「无 `--model`」⇒ **歧义**（可能是 BYOK，也可能是 modelId≠modeKey 的官方档位），
+     必须靠 `get_model_policy` 应答的 `custom_model.provider` 定路由（BYOK 时由我们写入哨兵）。
 
 ## 一、1.3.x 的执行体分流（核心发现）
 
