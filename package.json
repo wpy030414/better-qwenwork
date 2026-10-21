@@ -4,14 +4,9 @@
   "type": "module",
   "scripts": {
     "apply": "node src/index.mjs apply",
-    "unapply": "node src/index.mjs unapply",
-    "model": "node src/byok-model.mjs",
-    "test": "node src/bridge-shim.test.mjs",
-    "e2e": "npm run test && npm run e2e:native && npm run e2e:sdk",
-    "e2e:native": "node e2e-diff.mjs",
-    "e2e:sdk": "node e2e-sdk.mjs",
-    "e2e:real": "node e2e-real.mjs"
+    "unapply": "node src/index.mjs unapply"
   },
+  "//devDependencies": "本仓库产品代码零第三方依赖（只用 node 内置）。这个包只服务于一件事：千问办公自带的厂商 SDK（.analysis/vendor-sdk，只读复制来的）其裸依赖 import '@modelcontextprotocol/sdk' 需要由本仓库 node_modules 解析，才能复现 docs/researches 里的真机取证。",
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1"
   }

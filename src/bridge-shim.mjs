@@ -46,7 +46,7 @@ const CLAUDE_BIN = process.env.QODER_BRIDGE_CLAUDE ?? DEFAULT_CLAUDE_BIN;
 const FORCE_MODEL = process.env.QODER_BRIDGE_MODEL; // 可选：强制指定 claude 模型（覆盖探测结果）
 // SDK 1.0.53 内置 protocol_version=1.5.0；major 必须一致，否则 SDK 拒绝握手
 const PROTOCOL_VERSION = '1.5.0';
-// BYOK 档位哨兵：由 `pnpm model add` 写进千问办公 byok_custom_models.provider 列。
+// BYOK 档位哨兵：由 `pnpm apply` 写进千问办公 byok_custom_models.provider 列。
 // App 的 resolveModel 会把它经 get_model_policy 应答的 custom_model.provider 原样回传，
 // 这是我们唯一零猜测的路由判据。
 const BYOK_MARKER = process.env.QODER_BRIDGE_BYOK_PROVIDER ?? 'claude-bridge';

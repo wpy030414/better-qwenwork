@@ -1,6 +1,15 @@
 #!/usr/bin/env node
-// src/index.mjs — pnpm apply / pnpm unapply
-// 注册或撤销用户级环境变量 QODER_CLI_PATH + QODERCLI_PATH，让千问办公走 Claude Code 桥接
+// src/index.mjs — 唯一的安装/撤销入口（pnpm apply / pnpm unapply）
+//
+// apply 一条命令做完「共存」需要落在系统里的全部三件事：
+//   1. 注册挂点：用户级环境变量 QODER_CLI_PATH + QODERCLI_PATH → shim 绝对路径
+//      （App 壳层 getBundledQoderCliPath() 读前者，SDK 内核 resolveExecutable() 读后者，
+//        缺一个 shim 就不会被调用）。
+//   2. 注册开关：ALLOW_CUSTOM_BYOK=1 → 千问办公官方 BYOK 显示门（D16）。
+//   3. 供给档位：往 App 的 byok_custom_models 表写/更新一条 provider=claude-bridge 的记录，
+//      并落档位文案（D17：原独立入口已合并到此）。
+// unapply 对称撤销：撤销全部变量 + 清掉本项目写入的档位 → 恢复原引擎。
+//
 // 跨平台：Windows（注册表 HKCU\Environment + WM_SETTINGCHANGE 广播）/
 //         macOS（LaunchAgent：登录时 launchctl setenv 自动注入 + apply/unapply 时即时生效）
 import { execSync } from 'node:child_process';
@@ -8,6 +17,11 @@ import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
+import {
+  DB_PATH, PROVIDER_MARKER, DEFAULT_TITLE, DEFAULT_ALIAS,
+  openDb, listTiers, ourTiers, createTier, updateTier, rememberIntent,
+  removeTier, removeOurs, readExtra,
+} from './byok-store.mjs';
 
 const OS = platform();
 // Windows 用 .mjs 文件（SDK 自动识别并调用 node）
@@ -27,8 +41,9 @@ const ENV_NAMES = ['QODER_CLI_PATH', 'QODERCLI_PATH'];
 // 本机账号 allow_byok=0（企业基础版），故必须靠 env 短路。值接受 1/true/yes/on。
 // 它只打开「显示/允许 BYOK」这一道门，不改变官方档位（flash/pro）的任何行为。
 const GATE_ENV = { name: 'ALLOW_CUSTOM_BYOK', value: '1' };
-// 可选追加项：pnpm apply --claude-model <别名> 时注册 QODER_BRIDGE_MODEL
-// （BYOK 的 model 列被用作副标题文案后，真实模型只能靠这个变量指定）
+// 可选追加项：apply --claude-model <别名> 时注册 QODER_BRIDGE_MODEL。
+// 它管的是 **claude 侧真实模型**（shim 的 FORCE_MODEL，覆盖探测结果）；
+// --model 管的是 BYOK 表 model 列（下拉副标题的兜底来源）。两个别混用。
 const EXTRA_ENV = [];
 
 // ---------- Windows 实现 ----------
@@ -162,7 +177,7 @@ const broadcastChange = () => {
   // macOS launchctl setenv 由 launchd 即时分发给其后启动的进程，无需广播
 };
 
-// ---------- 命令 ----------
+// ---------- 环境变量注册 ----------
 
 // 要注册的变量全集：shim 劫持点（值 = shim 路径）+ BYOK 显示门（值 = '1'）+ 本次可选项
 const entries = () => [
@@ -181,7 +196,7 @@ const removalEntries = () => [
     .map((name) => ({ name })),
 ];
 
-const apply = async () => {
+const registerEnv = () => {
   const list = entries();
   if (OS === 'win32') {
     for (const { name, value } of list) {
@@ -202,17 +217,8 @@ const apply = async () => {
     for (const { name, value } of list) macSetEnvNow(name, value);
   }
   broadcastChange();
-  console.log(`\n已注册（${OS === 'win32' ? 'Windows 注册表' : 'macOS LaunchAgent'}）:`);
+  console.log(`已注册（${OS === 'win32' ? 'Windows 注册表' : 'macOS LaunchAgent'}）:`);
   for (const { name, value } of list) console.log(`  ${name}=${value}`);
-  console.log(`\n${GATE_ENV.name} 是千问办公官方的 BYOK 开关（hasCustomByokEnvOverride），`);
-  console.log('只影响「自定义模型」是否可见可选，不改变官方 flash/pro 档位的任何行为。');
-  await reapplyLabels();
-  console.log('下一步：pnpm model add --model <claude 模型别名> --api-key placeholder');
-  if (OS === 'win32') {
-    console.log('重启千问办公即可生效。');
-  } else {
-    console.log('重启千问办公即可生效（当前会话已即时注入；重启电脑后登录时由 LaunchAgent 自动恢复）。');
-  }
 };
 
 // 自定义标题/副标题存在千问办公的本地文案缓存里，而 App 会周期性用云端数据整体覆盖
@@ -220,68 +226,271 @@ const apply = async () => {
 // 动态 import + try 包住全部失败面：dynamic-text.mjs 依赖 node:sqlite（Node 22+），
 // 若静态引入，老版本 Node 会让**整个 pnpm apply 崩掉**——而 apply 的本职只是注册环境变量，
 // 文案重放只是锦上添花，绝不能拖垮主流程。首次安装时缓存文件还不存在，同属正常跳过。
-// Linux 下 Electron 默认 userData = ~/.config/<app name>，故根目录已含 QwenWorkCN，不再拼接。
-const APP_DATA_ROOT = OS === 'win32' ? join(process.env.APPDATA ?? '', 'QwenWorkCN')
-  : OS === 'darwin' ? join(homedir(), 'Library', 'Application Support', 'QwenWorkCN')
-  : join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'QwenWorkCN');
-const AGENTS_DB = join(APP_DATA_ROOT, 'data', 'agents.db');
 async function reapplyLabels() {
   try {
     const { reapplyFromDb } = await import('./dynamic-text.mjs');
-    const done = reapplyFromDb(AGENTS_DB);
+    const done = await reapplyFromDb(DB_PATH);
     if (done.length) {
       console.log(`已重放档位文案 ${done.length} 条：`);
       for (const d of done) console.log(`  ${d.key} → ${d.label ?? '(默认)'}${d.description ? ` / ${d.description}` : ''}`);
+    } else {
+      console.log('（无档位记录自定义文案，下拉将显示 App 兜底标题）');
     }
   } catch (e) {
     const first = String(e?.message ?? e).split('\n')[0];
-    if (/缓存不存在|数据库不存在|Unknown module|node:sqlite|is not supported/i.test(first)) {
-      console.log(`（档位文案未重放：启动过一次千问办公、且 Node ≥ 22 后再跑 pnpm apply 即可）`);
-    } else console.warn(`警告：档位文案重放失败 —— ${first}`);
+    // 只有「预期内的缺失」才静默跳过（由抛出方打 e.silent 标记）：
+    //   · 缓存不存在 —— App 还没从云端拉过该 namespace
+    //   · 数据库不存在 —— 首次安装，App 数据目录还没建
+    //   · node:sqlite 不可用 —— Node < 22
+    // 其余（EBUSY/EACCES/表结构变更等）是**真故障**，必须出声；
+    // 早期用 /数据库不存在/ 匹配错误文本，会把「找不到千问办公数据库」这类
+    // 形状变化误判成故障、或把真故障误判成静默，故改为显式标记。
+    if (e?.silent) console.log(`（档位文案未重放：${first}）`);
+    else console.warn(`警告：档位文案重放失败 —— ${first}`);
   }
 }
 
-const unapply = () => {
+// ---------- 档位供给（原独立入口合并至此） ----------
+
+// 幂等：表里已有本项目的哨兵行 → 更新它（**不换 key**，否则 App 记在 modelLevel 里的
+// 选中状态会失效并回落默认档位）；没有 → 新建一条。
+// 更新时**只改被点名的字段**：裸跑 pnpm apply 的语义是「补上缺失的挂点/档位」，
+// 不是「把档位重置成默认值」——若在这里回落 DEFAULT_ALIAS，会把训练员手选的
+// model 列（例如 fable[1m]）静默改回 opus，那是破坏性改写而不是安装。
+// 多条哨兵行只更新最早那条并提示，不擅自删用户手动建的同源档位。
+async function supplyTier(f) {
+  const alias = f.model;
+  const title = f.name ?? f.displayName;
+  const db = await openDb();
+  try {
+    const ours = ourTiers(db);
+    let key;
+    if (ours.length === 0) {
+      key = createTier(db, {
+        alias: alias ?? DEFAULT_ALIAS,
+        title: title ?? DEFAULT_TITLE,
+        apiKey: f['api-key'] ?? 'placeholder',
+        style: f.style,
+        url: f.url,
+        isVl: f.vl !== false,
+        maxInput: f['max-input'] ? Number(f['max-input']) : undefined,
+        maxOutput: f['max-output'] ? Number(f['max-output']) : undefined,
+      });
+      console.log(`已新建档位 ${key}`);
+    } else {
+      key = updateTier(db, ours[0].key, { title, alias, style: f.style }).key;
+      console.log(`已确认档位 ${key}（沿用原 key；未点名的字段保持原值）`);
+      if (ours.length > 1) {
+        console.log(`  注意：表里还有 ${ours.length - 1} 条本项目档位未被本次改动，`
+          + `用 pnpm apply list 查看，pnpm apply prune 一次清空。`);
+      }
+    }
+    reportTier(key, db);
+    return key;
+  } finally { db.close(); }
+}
+
+// 文案 = 本地文案缓存的键值 + 行内「意图源」（云端覆盖后可重放），两处一起写。
+// dynamic-text.mjs 只在需要文案时动态引入：它经 byok-store 用 node:sqlite（Node 22+），
+// 老版本 Node 上「写文案」这件事可以降级，不该拖垮挂点注册那条主流程。
+// strict 区分两种失败面：
+//   · 顺手补写（apply 的一部分）→ 只警告，档位与环境变量已经装好，文案是锦上添花；
+//   · 显式请求（apply labels）→ 抛给上层报错退出，否则用户以为文案改了其实没改。
+async function writeLabelsFor(key, { label, description }, { strict = false } = {}) {
+  if (label == null && description == null) return;
+  try {
+    const { setModelLabels } = await import('./dynamic-text.mjs');
+    const r = setModelLabels(key, { label, description });
+    const db = await openDb();
+    try { rememberIntent(db, key, { label, description }); } finally { db.close(); }
+    console.log(`  文案：${label ?? '(沿用)'} / ${description ?? '(沿用)'}`
+      + `（缓存键 ${r.touched.join(', ')}，version=${r.version}）`);
+  } catch (e) {
+    if (strict) throw e;
+    // 预期内的缺失（App 还没拉过文案缓存 / Node < 22 / 首次安装没 DB）：提示就好
+    if (e?.silent) {
+      console.log(`  （档位文案未写入：${String(e.message).split('\n')[0]}）`);
+      console.log('  档位本身已就绪；启动过千问办公后再跑一次 pnpm apply 即可补上。');
+      return;
+    }
+    // 真故障（缓存形状不符、DB 被锁、写盘失败）必须大声报警：
+    // 静默吞掉会让用户以为文案改了，而缓存里仍是旧值——App 下次读出来还是旧的，无从排查
+    console.warn(`警告：档位文案写入失败 —— ${String(e?.message ?? e).split('\n')[0]}`);
+    console.warn('档位已就绪，但下拉文案可能与预期不符；可用 pnpm apply labels --key … 单独重试。');
+  }
+}
+
+const reportTier = (key, db) => {
+  const row = listTiers(db).find((r) => r.key === key);
+  if (!row) return;
+  const extra = readExtra(row);
+  console.log(`  标题            = ${extra.label ?? row.display_name}`);
+  console.log(`  model 列        = ${row.model}（下拉副标题的兜底来源）`);
+  console.log(`  provider        = ${row.provider}   ← shim 的路由哨兵，勿改`);
+};
+
+async function showTiers() {
+  const db = await openDb();
+  try {
+    const rows = listTiers(db);
+    if (rows.length === 0) { console.log(`(byok_custom_models 为空)\n数据库: ${DB_PATH}`); return; }
+    console.log(`数据库 ${DB_PATH}`);
+    for (const r of rows) {
+      const ours = r.provider === PROVIDER_MARKER ? '  ← 本项目' : '';
+      const extra = readExtra(r);
+      console.log(`${r.key}  ${extra.label ?? r.display_name}  model=${r.model}  style=${r.style}  provider=${r.provider}${ours}`);
+      if (extra.description) console.log(`    副标题文案: ${extra.description}`);
+    }
+  } finally { db.close(); }
+}
+
+async function pruneTiers() {
+  const db = await openDb();
+  try {
+    const n = removeOurs(db);
+    console.log(n > 0 ? `已清除本项目写入的 ${n} 个档位` : '本项目未写入过档位');
+  } finally { db.close(); }
+}
+
+// ---------- 命令 ----------
+
+const cmdApply = async (f) => {
+  registerEnv();
+  // 档位是「共存」的另一半：只注册 env 不写档位，下拉里永远等不到 Claude 条目。
+  // 数据库不存在（还没启动过千问办公）时不能让整个 apply 崩掉——变量已注册成功，
+  // 下次 apply 补档位即可，所以这里降级为显式警告。
+  let key = null;
+  try {
+    key = await supplyTier(f);
+  } catch (e) {
+    console.warn(`\n档位未写入：${String(e?.message ?? e).split('\n')[0]}`);
+    console.warn('环境变量已注册。启动过一次千问办公后，再跑一次 pnpm apply 即可补上档位。');
+  }
+  if (key) await writeLabelsFor(key, { label: f.label, description: f.description ?? f.subtitle });
+  console.log(`\n${GATE_ENV.name} 是千问办公官方的 BYOK 开关（hasCustomByokEnvOverride），`);
+  console.log('只影响「自定义模型」是否可见可选，不改变官方 flash/pro 档位的任何行为。');
+  await reapplyLabels();
+  console.log('\n重启千问办公即可生效（必须完全退出所有 QwenWorkCN 进程）。');
+  if (OS === 'darwin') console.log('重启电脑后由 LaunchAgent 在登录时自动恢复注入。');
+};
+
+const cmdLabels = async (f) => {
+  const { getModelLabels, reapplyFromDb, CACHE_FILE } = await import('./dynamic-text.mjs');
+  if (f['from-db']) {
+    const done = await reapplyFromDb(DB_PATH);
+    console.log(`从 DB 意图源重放 ${done.length} 条文案到 ${CACHE_FILE}`);
+    for (const d of done) console.log(`  ${d.key} → 标题=${d.label} 副标题=${d.description}`);
+    return;
+  }
+  const key = f.key;
+  const label = f.label ?? f.name;
+  const description = f.description ?? f.subtitle;
+  // 只查不写：`pnpm apply labels --key <k>` 或 `--key <k> --show`
+  if (label == null && description == null) {
+    if (!key) throw new Error('缺少 --key（写文案要给 --label/--description；或用 --from-db 重放全部）');
+    console.log(JSON.stringify(await showLabels(key), null, 2));
+    return;
+  }
+  if (!key) throw new Error('缺少 --key（查 key 用 pnpm apply list）');
+  // strict：显式请求写文案，失败就要报错退出，不能只打个警告宣称「已写入」
+  await writeLabelsFor(key, { label, description }, { strict: true });
+  console.log('  意图已记入 DB 行 extra_params，云端覆盖后可用 pnpm apply labels --from-db 重放');
+  if (f.show) console.log(JSON.stringify(await showLabels(key), null, 2));
+};
+
+// 读文案：缓存文件还不存在时不报错，回一个 found:false 的形状
+// （「查一下现在显示什么」是安全操作，不该因为 App 没拉过云端而失败）
+const showLabels = async (key) => {
+  try {
+    const { getModelLabels } = await import('./dynamic-text.mjs');
+    return getModelLabels(key);
+  } catch (e) {
+    if (e?.silent) return { found: false, perLang: {}, reason: String(e.message).split('\n')[0] };
+    throw e;
+  }
+};
+
+const cmdUnapply = async (f) => {
   let removed = 0;
   const list = removalEntries();
   if (OS === 'win32') {
     for (const { name } of list) {
-      if (getCurrentValue(name)) {
-        delEnv(name);
-        removed++;
-      }
+      if (getCurrentValue(name)) { delEnv(name); removed++; }
     }
   } else {
     if (macDeletePlist()) removed++;
     for (const { name } of list) {
-      if (macGetEnvValue(name)) {
-        macUnsetEnvNow(name);
-        removed++;
-      }
+      if (macGetEnvValue(name)) { macUnsetEnvNow(name); removed++; }
     }
   }
-  if (removed === 0) {
-    console.log('未注册，无需撤销。');
-    return;
+  // 档位默认一并清掉：留着它，下拉里仍可被选中，而 App 会拿占位 api_key 直连 MaaS
+  // 被账号权限拒绝（UI 报「没有使用该模型或能力的权限」）。这是真机踩过的坑，
+  // 所以「撤销」必须是干净的——除非训练员明确要留着档位只撤注入。
+  if (!f['keep-tier']) {
+    try {
+      const db = await openDb();
+      try {
+        const n = removeOurs(db);
+        if (n > 0) { console.log(`已清除本项目写入的 ${n} 个档位`); removed += n; }
+      } finally { db.close(); }
+    } catch (e) {
+      console.log(`（档位未清除：${String(e?.message ?? e).split('\n')[0]}）`);
+    }
+  } else {
+    console.log('已保留 byok 档位（--keep-tier）；若之后不撤注入又留着它，选中它会走官方占位 key 而被拒权。');
   }
+  if (removed === 0) { console.log('未注册，无需撤销。'); return; }
   broadcastChange();
-  console.log(`已撤销 ${removed} 项注册，重启千问办公恢复原引擎。`);
+  console.log(`已撤销 ${removed} 项，重启千问办公恢复原引擎。`);
 };
 
-const cmd = process.argv[2];
-// pnpm apply --claude-model fable[1m]
-//   额外注册 QODER_BRIDGE_MODEL：当 BYOK 的 model 列被用作副标题文案时，
-//   真实 claude 模型只能由这个变量提供（见 src/byok-model.mjs 的 subtitle 说明）。
-const extraArgs = process.argv.slice(3);
-if (cmd === 'apply') {
-  const m = extraArgs.find((a) => a.startsWith('--claude-model')) ?? null;
-  const modelVal = m ? (m.includes('=') ? m.split('=')[1] : extraArgs[extraArgs.indexOf(m) + 1]) : null;
-  if (modelVal) EXTRA_ENV.push({ name: 'QODER_BRIDGE_MODEL', value: modelVal });
-  await apply();
-} else if (cmd === 'unapply') unapply();
-else {
-  console.log('用法:');
-  console.log('  pnpm apply [--claude-model <claude 模型别名>]  注册挂点 + BYOK 开关');
-  console.log('  pnpm unapply  撤销全部变量 → 恢复原引擎');
-  console.log(`\n当前平台: ${OS}（${OS === 'win32' ? 'Windows 注册表' : 'macOS LaunchAgent'}）`);
+const parseFlags = (argv) => {
+  const out = {};
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (!a.startsWith('--')) continue;
+    const k = a.slice(2);
+    if (i + 1 < argv.length && !argv[i + 1].startsWith('--')) out[k] = argv[++i];
+    else out[k] = true;
+  }
+  return out;
+};
+
+const usage = () => {
+  console.log(`用法:
+  pnpm apply [--model <claude 别名>] [--name <标题>] [--label <文案标题>] [--description <文案副标题>] [--api-key <占位>]
+      一条命令装完：注册挂点 + BYOK 开关，并写入/更新「Claude」档位（幂等，沿用原 key）
+  pnpm apply list            查看 App 的自定义档位（含本项目写入的哨兵行）
+  pnpm apply labels --key <byok-..>            查该档位当前文案
+  pnpm apply labels --key <byok-..> [--label ..] [--description ..]   改档位文案
+  pnpm apply labels --from-db 云端覆盖文案缓存后，从 DB 意图源重放
+  pnpm apply prune           仅清除本项目写入的档位，不碰用户自配的 BYOK
+  pnpm unapply [--keep-tier] 撤销全部环境变量（默认一并清掉本项目档位）→ 恢复原引擎
+
+当前平台: ${OS}（${OS === 'win32' ? 'Windows 注册表' : OS === 'darwin' ? 'macOS LaunchAgent' : 'Linux 注册表等价'}）
+数据库: ${DB_PATH}
+路由哨兵 provider: ${PROVIDER_MARKER}`);
+};
+
+const [, , cmd, ...rest] = process.argv;
+const sub = !rest[0]?.startsWith('--') ? rest[0] : null;
+const flags = parseFlags(rest);
+try {
+  if (cmd === 'apply') {
+    // --claude-model 是「强制 claude 侧模型」的历史挂点，与档位 model 列**不是一回事**：
+    // 它注册 QODER_BRIDGE_MODEL，shim 会用它覆盖探测到的模型名（见 bridge-shim.mjs FORCE_MODEL）。
+    if (flags['claude-model']) EXTRA_ENV.push({ name: 'QODER_BRIDGE_MODEL', value: flags['claude-model'] });
+    if (sub === 'list') await showTiers();
+    else if (sub === 'labels') await cmdLabels(flags);
+    else if (sub === 'prune') await pruneTiers();
+    else if (sub) throw new Error(`未知子命令 ${sub}（可用：list / labels / prune）`);
+    else await cmdApply(flags);
+  } else if (cmd === 'unapply') {
+    await cmdUnapply(flags);
+  } else {
+    usage();
+  }
+} catch (e) {
+  console.error(`失败: ${e.message}`);
+  process.exit(1);
 }

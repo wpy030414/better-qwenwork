@@ -15,12 +15,11 @@
 //     if (l && l.version === a.version && l.sourceKey === i) { "Version unchanged, skipping update"; return }
 //   即**只有云端版本号变化时**才整体覆盖落盘（自定义键随之丢失），平时重启不受影响。
 //   因此期望文案另存一份于 byok_custom_models.extra_params 作为意图源，
-//   丢失后 `pnpm model labels --from-db` 一条命令即可重放；pnpm apply 也会顺手重放。
+//   丢失后 `pnpm apply labels --from-db` 一条命令即可重放；pnpm apply 本身也会顺手重放。
 // - sourceKey 必须与运行时解析一致（["baseline","<gateway>"]），否则内存缓存会拒绝这份磁盘数据；
 //   本模块只在已存在该文件时补写键值，不凭空造文件。
 import { readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 
 const DATA_ROOT = join(
   process.platform === 'win32' ? process.env.APPDATA : process.platform === 'darwin'
@@ -32,7 +31,14 @@ const DATA_ROOT = join(
 const CACHE_FILE = process.env.QWENWORK_DYNAMIC_TEXT_CACHE ?? join(DATA_ROOT, 'qwenwork.json');
 
 const readCache = () => {
-  if (!existsSync(CACHE_FILE)) throw new Error(`本地文案缓存不存在：${CACHE_FILE}\n（需先启动过一次千问办公，让它从云端拉下该 namespace）`);
+  if (!existsSync(CACHE_FILE)) {
+    // silent：App 还没从云端拉过该 namespace 属**预期内**缺失，
+    // 由调用方决定是静默跳过（pnpm apply 的顺手重放）还是报警（用户显式要写文案）。
+    const e = new Error('本地文案缓存不存在：' + CACHE_FILE
+      + '\n（需先启动过一次千问办公，让它从云端拉下该 namespace）');
+    e.silent = true;
+    throw e;
+  }
   const j = JSON.parse(readFileSync(CACHE_FILE, 'utf8'));
   if (!j.data || !j.version) throw new Error(`本地文案缓存形状不符：缺 data/version`);
   return j;
@@ -68,11 +74,12 @@ export function getModelLabels(key) {
 }
 
 // 期望文案存在 byok_custom_models.extra_params（App 只原样读出、不解释这些键，安全），
-// 所以恢复只需一条命令：pnpm model labels --from-db
-// dbPath 由调用方传入（byok-model.mjs 已有权威的定位逻辑，不在此重复平台分支）
-export function reapplyFromDb(dbPath) {
-  if (!existsSync(dbPath)) throw new Error(`数据库不存在：${dbPath}`);
-  const db = new DatabaseSync(dbPath, { readOnly: true });
+// 所以恢复只需一条命令：pnpm apply labels --from-db
+// 开库交给 src/byok-store.mjs（唯一的数据层，含 node:sqlite 的动态引入与平台路径判定），
+// 故本模块自身不静态依赖 sqlite：老版本 Node 上「写文案」这件事降级即可。
+export async function reapplyFromDb(dbPath) {
+  const { openDb } = await import('./byok-store.mjs');
+  const db = await openDb(dbPath, { readOnly: true });
   let rows;
   try {
     rows = db.prepare('select key, display_name, extra_params from byok_custom_models').all();

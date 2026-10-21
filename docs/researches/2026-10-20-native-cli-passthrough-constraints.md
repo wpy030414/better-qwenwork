@@ -176,7 +176,7 @@ else if (l !== void 0) { let {model:g, ...S} = l; p.model = g; p.custom_model = 
 
 即 App 的 `resolveModel` 返回字符串 ⇒ 官方档；返回对象 ⇒ BYOK 档并带 `custom_model`。
 实测真实 SDK 1.0.53 会认下 shim 主动发的这条探测帧并回调宿主的 `resolveModel`
-（`e2e-sdk.mjs`：`resolveModel` 收到 `{purpose:"main", turnIndex:0, availableModels:[]}`）。
+（`.analysis/legacy-verification/e2e-sdk.mjs`：`resolveModel` 收到 `{purpose:"main", turnIndex:0, availableModels:[]}`）。
 
 两个实现期踩到的真坑（均为 shim 侧必修）：
 

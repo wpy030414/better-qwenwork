@@ -161,7 +161,7 @@ spawn 前检测命令行总长度，超 8000 字符时记日志 `SPAWN-WARN` 并
   - Windows: `QODER_CLI_PATH` 指向 `.mjs` 文件（SDK 自动识别并用 node 执行）。
   - macOS: `QODER_CLI_PATH` 指向 `.sh` wrapper（绕过 SDK PATH 限制，wrapper 内部探测 node 绝对路径）。
 
-## 实现与测试
+## 实现
 
 ### 文件清单
 
@@ -169,8 +169,8 @@ spawn 前检测命令行总长度，超 8000 字符时记日志 `SPAWN-WARN` 并
 |---|---|
 | `src/bridge-shim.mjs` | 核心翻译层（参数翻译 + 控制协议应答 + 事件改写 + 台账） |
 | `src/bridge-shim-wrapper.sh` | macOS shell wrapper（绕过 SDK PATH 限制，探测 node 绝对路径） |
-| `src/bridge-shim.test.mjs` | 自动化测试（模拟 SDK 调用 shim，验证内部查询 + 真实会话多轮） |
-| `src/index.mjs` | `pnpm apply`/`pnpm unapply`：注册/撤销 `QODER_CLI_PATH` + `QODERCLI_PATH` 两个环境变量（跨平台：Windows 注册表 + macOS `LaunchAgent`） |
+| `src/index.mjs` | `pnpm apply`/`pnpm unapply`：注册/撤销两个环境变量 + 供给档位（跨平台：Windows 注册表 + macOS `LaunchAgent`） |
+| `src/byok-store.mjs` | `byok_custom_models` 数据层（无命令面，见 D17） |
 
 ### 环境变量
 
@@ -190,13 +190,13 @@ spawn 前检测命令行总长度，超 8000 字符时记日志 `SPAWN-WARN` 并
 1. ✅ **Spy 阶段**：写只记录不改写的 `spy.mjs`，设 `QODER_CLI_PATH=spy.mjs`，重启千问办公走完整任务，产出真实协议样本（`src/logs/spy-*.log`）。
 2. ✅ 依据样本校准 spec 的应答表与改写表。
 3. ✅ 实现 `src/bridge-shim.mjs`。
-4. ✅ 冒烟测试：`src/bridge-shim.test.mjs` 模拟 SDK 验证事件流。
+4. ✅ 冒烟验证：以密闭 harness 模拟 SDK 驱动 shim，验证事件流（该套观测已于 2026-10-21 转写为 `docs/researches/2026-10-21-shim-behavior-contract.md`，代码库内不再保留验证代码，见 D18）。
 5. ✅ **macOS 平台适配**：新增 `bridge-shim-wrapper.sh`，解决 SDK PATH 限制导致 spawn 失败的问题。
 6. 待办：联调（设 `QODER_CLI_PATH` → 重启 app → 全流程验证）。**已部分通过**（单轮会话成功），多轮/技能/回归待补。
 
 ## 验收标准
 
-- [x] 自动化测试通过（`node src/bridge-shim.test.mjs`：内部查询 + 真实会话多轮）。
+- [x] 行为契约观测成立（8 组 42 项：三条分支 + 共存不变式 + 翻译回归，见 `docs/researches/2026-10-21-shim-behavior-contract.md` §二）。
 - [x] 千问办公内发送任务：回复流式渲染，无报错弹窗（2026-08-21 14:18 首条 ledger `is_error: false` 会话落地，cost $0.0477，18063ms）。
 - [ ] 多轮对话上下文连续（第二轮的 `--resume` 命中同一 claude 会话）。
 - [ ] 子代理调用在 UI 显示为 Agent 卡片（Task→Agent 映射生效）。
@@ -243,7 +243,7 @@ spawn 前检测命令行总长度，超 8000 字符时记日志 `SPAWN-WARN` 并
 4. **macOS PATH 限制**：SDK 的 `buildQoderAgentSdkRuntimeEnv` 把 PATH 硬编码为 `/usr/bin:/bin:/usr/sbin:/sbin`，不含 `/opt/homebrew/bin`，导致 `.mjs` 文件 spawn 时报 "executable not found"。新增 shell wrapper 探测 node 绝对路径后解决（详见 DECISIONS.md D8）。
 5. **首条成功会话**：sessionId `bfce2bb1-862a-4141-9229-3cca29fe6d6f`，cost $0.047655，1 turn，18063ms，`is_error: false`。
 
-### 已通过的自测（src/bridge-shim.test.mjs）
+### 已通过的自测（观测记录，代码已于 2026-10-21 移出仓库，见 D18）
 
 - 内部查询：initialize+get_models 应答、exit 0 ✓
 - 真实会话两轮：initialize 应答 → user×2 → result×2（同 session）→ exit 0，init 注入 protocol_version ✓

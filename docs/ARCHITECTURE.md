@@ -125,13 +125,15 @@ out/main/index.js（Electron 主进程，打包为 out/main/main.js）
 ### Claude 档位怎么来（共存的另一半）
 
 ```
-src/byok-model.mjs（pnpm model add/list/rm/prune）
+src/byok-store.mjs（数据层，无命令面）+ src/index.mjs 的 apply（命令面，见 D17）
    └─ 写 %APPDATA%\QwenWorkCN\data\agents.db 的 byok_custom_models 表
         ├─ provider = 'claude-bridge'  ← shim 的路由哨兵，勿改
-        ├─ style/format = anthropic，model = opus（别名，任何 Claude 登录态都吃）
+        ├─ style/format = anthropic；model 列 = 别名（如 opus，任何 Claude 登录态都吃）
         ├─ encrypted_parameters = {"api_key":{"encoding":"plainBase64","value":"..."}}
         │   （App 官方支持该分支；safeStorage 不可用时的落盘形态，零第三方依赖）
         └─ key = byok-<base64url>（与 App 的 createByokModelKey() 同构，前缀必须保留）
+      node:sqlite 只在真要开库时动态引入：老版本 Node 上「写档位」这件事降级即可，
+      不拖垮挂点注册那条主流程。
 
 App 侧读取链（无需改 App）：
    listByokCustomModels() → ModelCatalogService({loadCustomModels}) → auth.getModels
@@ -146,11 +148,16 @@ App 侧读取链（无需改 App）：
 ### 辅助工具
 
 ```
-src/index.mjs（pnpm apply / pnpm unapply，跨平台）
-   ├─ 注册三项：QODER_CLI_PATH + QODERCLI_PATH → shim 绝对路径
-   │            ALLOW_CUSTOM_BYOK=1 → BYOK 显示门（D16）
+src/index.mjs（pnpm apply / pnpm unapply，唯一的安装/撤销入口，跨平台）
+   ├─ apply：注册三项 + 供给档位 + 落文案，一条命令做完
+   │    QODER_CLI_PATH + QODERCLI_PATH → shim 绝对路径
+   │    ALLOW_CUSTOM_BYOK=1 → BYOK 显示门（D16）
+   │    byok_custom_models 写入/更新哨兵档位（D17；幂等沿用原 key，未点名不改写）
+   │    档位文案写本地缓存 + 行内意图源，并顺手重放一次
+   ├─ apply list | labels | prune：查看档位 / 只改文案（含 --from-db 重放）/ 清哨兵行
    ├─ Windows: reg add HKCU\Environment + WM_SETTINGCHANGE 广播；unapply 反删除
-   └─ macOS:   LaunchAgent plist（RunAtLoad setenv）+ 即时 setenv；unapply unsetenv + 删 plist
+   ├─ macOS:   LaunchAgent plist（RunAtLoad setenv）+ 即时 setenv；unapply unsetenv + 删 plist
+   └─ unapply：撤销全部变量，**默认一并清除本项目档位**（留档位会让占位 api_key 直连 MaaS → 403）
    注意：注册表/launchd 只对**之后启动**的进程生效；已运行的千问办公需重启。
 
 src/native-cli.mjs（官方 CLI 定位，供 passthrough 使用）
@@ -174,22 +181,25 @@ src/bridge-shim-wrapper.sh（macOS 专用）
 5. 双向控制桥接 + 事件改写 → SDK → main.js → renderer 渲染。
 6. `result` → shim 记台账 → 退出码原样传播（含 41）。
 
-### 验证面
+### 验证面（已转为研究成果，代码库内不含验证代码）
 
-```
-pnpm test          src/bridge-shim.test.mjs  38 项断言/7 组：三条分支 + 共存不变式
-                            （argv 零改写、env 增删、探测帧不外泄、退出码 41 传播、翻译回归）
-pnpm e2e:native    e2e-diff.mjs  真实 qoderclicn.exe 差分：直连 vs 经 shim 透传
-                            归一化帧序列同构 + 退出码一致 + 无 sdk_invalid_args
-pnpm e2e:sdk       e2e-sdk.mjs  真实厂商 SDK 1.0.53 驱动 shim（get_model_policy 探测帧
-                            被 SDK 认下并回调宿主 resolveModel、握手过校验）7 项
-pnpm e2e           上面三层一次跑完（不产生 Claude 侧调用）
-pnpm e2e:real      e2e-real.mjs  真实 claude.exe + 真实官方 CLI 双分支 7 项
-                            （实测回复「共存成功」，$0.009~0.073/次，走主人既有 Claude 计费）
+本仓库**不提供** `pnpm test` / `pnpm e2e` 之类的入口：验证代码会长期腐蚀为与实现同寿的负担，
+而它的产物是「某个时间点对真实系统的观测」——那属研究，属文档。故全部验证结论已转写为
+带证据链的取证记录，代码库只保留产品实现（决策见 `docs/DECISIONS.md` D18）：
 
-厂商 SDK 由 vendor-sdk.mjs 从 App 安装目录只读复制并暂存到 .analysis/vendor-sdk
-（可重建、已 gitignore）；其裸依赖 @modelcontextprotocol/sdk 由本仓库 node_modules 提供。
-```
+| 结论 | 载体 |
+|---|---|
+| 三分支行为契约 42 项（argv 零改写 / env 增删 / 探测帧不外泄 / 退出码 41 传播 / 翻译回归 / 模型名守卫） | [researches/2026-10-21-shim-behavior-contract.md](researches/2026-10-21-shim-behavior-contract.md) §二 |
+| 真实 `qoderclicn.exe` 差分：直连 vs 经 shim 透传帧序列同构、退出码一致、无 `sdk_invalid_args` | 同上 §三 |
+| 真实厂商 SDK 1.0.53 认下探测帧并回调宿主 `resolveModel`（7 项） | 同上 §四 |
+| 真实 claude.exe 双分支 + 计费台账（4 条「共存成功」记录，$0.009~0.073/次） | 同上 §五 |
+| 真机 UI 闭环（下拉 4 档、点选被接受、路由 `qoder-cli`+`local-byok`） | 同上 §六 与本文「已知风险」小节 |
+| 档位字段约束 + 本地文案表 15 项读写观测 + 两个实测数据缺陷 | [researches/2026-10-21-byok-tier-and-dynamic-text.md](researches/2026-10-21-byok-tier-and-dynamic-text.md) |
+
+上述观测**可复现**：驱动脚本留在 `.analysis/legacy-verification/`（gitignore 的取证工具区，
+与仓库产品代码物理隔离）。厂商 SDK 由 App 安装目录只读复制暂存到 `.analysis/vendor-sdk`，
+其裸依赖 `@modelcontextprotocol/sdk` 由本仓库 `node_modules` 提供——这是 `devDependencies`
+里唯一的包，且只为复现服务。
 
 ### 已知风险（未在真机 UI 闭环的部分）
 

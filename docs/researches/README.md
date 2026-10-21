@@ -10,6 +10,8 @@
 |---|---|---|---|
 | [2026-10-20 引擎按 harness 分流与桥接失效取证](2026-10-20-engine-harness-routing.md) | QwenWorkCN 1.3.1 / 1.3.2 | 主对话自 1.3.x 起走 ACP 引擎（`opencode`/`qwencode`），不经过 `QODER_CLI_PATH`；纯 env 注入只能接到 `--bare` 内部查询，净效果为负收益 | 核心结论已确证；下拉框显示来源待验证 |
 | [2026-10-20 原生 CLI 透传的硬约束](2026-10-20-native-cli-passthrough-constraints.md) | 1.3.2 / SDK 1.0.53 / CLI 1.1.71 | 协议层透传成立（argv 与帧可裸管），但认证走 `fetch_job_token` 控制帧、`system/init` 不得改写、两侧会话体系互不相通——现有 shim 的合成兜底会直接破坏认证 | 一手证据 + 二手待复核项已分别标注 |
+| [2026-10-21 共存路由 shim 的行为契约](2026-10-21-shim-behavior-contract.md) | 1.3.2 / SDK 1.0.53 / CLI 1.1.71 | 8 组 42 项密闭观测 + 真 exe 差分 + 真 SDK 7 项 + 真机 4 条计费台账：官方链路零改写、只有哨兵档位被改道，逐条成立；复现工具在 `.analysis/legacy-verification/` | 全部成立（未覆盖项见其 §七） |
+| [2026-10-21 BYOK 档位供给与本地文案表](2026-10-21-byok-tier-and-dynamic-text.md) | 1.3.2 | 档位写进 `byok_custom_models` 即进下拉并被硬路由到 `qoder-cli`；标题/副标题唯一自由通道是本地文案缓存，会被云端整体覆盖故需行内意图源重放；15 项读写观测成立 | 全部成立；`style/format` 词表仍是推断 |
 
 ## 当前悬置问题（两份记录共同指向）
 

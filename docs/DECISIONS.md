@@ -205,8 +205,51 @@
 - **方案**：用 App 自己的 BYOK 机制。`byok_custom_models` 表由 `listByokCustomModels()` 无条件读取并作为 `customModels` 与云端 `models` 并列返回；下拉可见性只由一个布尔 `allowCustomBYOK` 控制，其判定为
   `hasCustomByokEnvOverride() || 账号 allowBYOK >= 2`，
   前者读 `process.env` / `~/.qwenworkcn/.env` 的 `ALLOW_CUSTOM_BYOK`/`ALLOW_BYOK`。本机账号 `allow_byok=0`，故走 env 短路（`pnpm apply` 已一并注册）。
-  `src/byok-model.mjs` 负责写表：`provider` 固定哨兵 `claude-bridge`（即 D15 的路由判据），`encrypted_parameters` 用 App 官方支持的 `{encoding:"plainBase64"}` 分支，零第三方依赖（node 22+ 内置 `node:sqlite`）。
+  写表逻辑（现落在 `src/byok-store.mjs`，见 D17）：`provider` 固定哨兵 `claude-bridge`（即 D15 的路由判据），`encrypted_parameters` 用 App 官方支持的 `{encoding:"plainBase64"}` 分支，零第三方依赖（node 22+ 内置 `node:sqlite`）。
 - **否决的替代方案**：`ENGINE_LOCAL_MANIFEST` 自制 manifest + 实现整套 ACP 服务端——工程量大一个数量级，且在 BYOK 路线可行后无必要；BYOK 的 `url` 指向本地反代——依赖额外进程且要处理鉴权形态；LOCAL_INFERENCE 通道——限死 `openai-chat` + 无凭据回环，与 Claude 的 OAuth 登录态不匹配。
 - **影响**：不碰 `app.asar`、不碰 UI、不绕付费墙；撤销只需 `pnpm unapply` + `pnpm model prune`。
+  （2026-10-21 更新：写表逻辑与命令面已随 D17 收敛为 `src/byok-store.mjs` + `pnpm apply`，撤销也合并进 `pnpm unapply`。）
 - **风险**：`style/format` 词表与 `custom_model` 校验规则取自二进制字符串与推断，UI 实测是唯一权威判据（见 ARCHITECTURE「已知风险」）。
 - **何时重新考虑**：账号 `allowBYOK >= 2`（则 env 开关可省）；或 App 加入官方「自定义 provider」白名单机制。
+
+## D17：档位供给并入 `apply`，BYOK 表逻辑下沉为数据层
+
+- **问题**：安装一件事被拆成两个入口——`pnpm apply` 管环境变量、`pnpm model` 管档位表。二者在语义上是同一次安装的两侧（缺任一侧共存都不成立），但命令面把它们并列，于是出现三类实际问题：
+  1. 只跑 `apply` 不算装完（下拉里没有档位），而 README 得写「下一步：`pnpm model add …`」——这是把内部边界暴露成用户的操作负担；
+  2. `byok-model.mjs` 与 `index.mjs` 各自实现了一遍 App 数据根目录的平台分支（Windows `%APPDATA%` / macOS `Application Support` / Linux `XDG_CONFIG_HOME`），两份真相必然漂移；
+  3. `unapply` 与档位删除分属两个命令，「撤销」不是一步完成的，留下了 §五 of researches/2026-10-21 记的那类 403 陷阱。
+- **方案**：`apply` 成为唯一安装入口——注册挂点 + BYOK 开关 + 写入/更新档位 + 落文案，一条命令做完；
+  档位管理退化为 `apply` 的子命令（`apply list` / `apply labels` / `apply prune`）；
+  `unapply` 对称撤销（默认一并清除本项目哨兵行，`--keep-tier` 可显式保留）。
+  表读写逻辑抽成 `src/byok-store.mjs`（**只有库、没有命令面**），供 `index.mjs` 与
+  `dynamic-text.mjs` 共用，平台路径判定归一。
+- **否决的替代方案**：把 `model` 保留为独立命令、只做内部重构——不解决「只跑 apply 不算装完」；
+  把 `model` 改名成 `status`/`clean` 等与 `apply` 平级的动词——命令面反而更长，且读/写仍分家。
+- **关键约束（实测踩出来的，勿回退）**：幂等**不等于「重写为默认值」**。新建路径才用默认别名/默认标题；
+  更新路径只改被点名的字段，且 `SELECT` 必须覆盖所有被回读的列——
+  当日就因漏选 `style` 列把真库那行写成了 `null`（详见 researches/2026-10-21-byok-tier-and-dynamic-text.md §四）。
+- **影响**：`node:sqlite` 改为开库时动态引入，老版本 Node 上「写档位/文案」降级为警告而不拖垮挂点注册；
+  撤销变成一条命令；App 数据路径只有一处定义。
+- **何时重新考虑**：若档位需要支持多条并存（同机挂多个 Claude 别名），`apply` 的「更新最早那条哨兵行」
+  需要换成显式 `--key` 语义；或 App 提供官方的自定义 provider 注册接口（则本命令面整体退场）。
+
+## D18：验证代码不进代码库，其产物转为研究成果
+
+- **问题**：仓库里长期放着 `bridge-shim.test.mjs`（42 项）、`dynamic-text.test.mjs`（15 项）、
+  `mock-claude.mjs`/`mock-native.mjs` 两个替身、以及 `e2e-diff/sdk/real/native.mjs` + `vendor-sdk.mjs`。
+  三个问题：(1) 这些代码与实现同寿，改 shim 必须同步改测试，负担随版本累积；
+  (2) 它们的真实产出是「某时间点对真系统的观测」，属研究结论，不是可执行的产品资产；
+  (3) `e2e-*` 需要厂商 SDK 暂存与 `@modelcontextprotocol/sdk` 依赖，把逆向素材的形状带进了 `src/` 的邻居目录。
+- **方案**：代码库内**不保留**任何验证代码——删除 `*.test.mjs`、`mock-*.mjs`、`e2e-*.mjs`、`vendor-sdk.mjs`，
+  `package.json` 只留 `apply`/`unapply` 两个脚本。观测结论全部转写进
+  `docs/researches/2026-10-21-shim-behavior-contract.md` 与
+  `docs/researches/2026-10-21-byok-tier-and-dynamic-text.md`（含观测手段、逐条结果、
+  构造教训、以及**未覆盖项**）。复现手段不放弃：驱动脚本移入 `.analysis/legacy-verification/`
+  （gitignore 的取证工具区，与产品代码物理隔离），文档里给出复现命令。
+- **风险与对策**：没了 CI 绿灯，回归只能靠人工复现。对策是把「判据」写进文档而不是只留断言——
+  例如「透传前删 `QODER_CLI_PATH`/`QODERCLI_PATH`、但保留 `QODER_AGENT_SDK_*`」这类不变式，
+  改动 shim 时按文档逐条自查；真机侧仍有 `src/logs/bridge-*.log` 的 `[DECIDE]` 行为现场判据。
+- **影响**：`AGENTS.md` 的代码结构图与 In-Scope 措辞随之更新；`devDependencies` 里唯一保留的包
+  只为「复现厂商 SDK 取证」服务，产品实现零第三方依赖。
+- **何时重新考虑**：若本项目要发布给他人使用（多用户/分发包——当前明确是 Non-Goal），
+  则必须重新引入可自动执行的测试面，因为届时无法靠作者本人的人工复现兜底。
