@@ -10,19 +10,20 @@
 
 ## 结论速览
 
-2026-10-21 复跑：**8 组共 42 项观测全部成立**。它们共同守护一条不变式：
+2026-10-21 复跑（含「默认文案统一源」改造后追加的第 9 组）：**9 组共 45 项观测全部成立**。
+它们共同守护一条不变式：
 **装了 shim 之后，官方链路必须与没装时一致；只有哨兵档位才被改道。**
 
 | 组 | 场景 | 守护的不变式 |
 |---|---|---|
-| 1 | 内部查询（`--bare`） | 透传且 argv 零改写；env 抹掉劫持变量防递归 |
-| 2 | 官方档位（带 `--model`） | 免探测直接透传，不多一次控制帧往返 |
+| 1 | 内部查询（`--bare`） | 透传且 argv 零改写；env 抹掉劫持变量防递归 || 2 | 官方档位（带 `--model`） | 免探测直接透传，不多一次控制帧往返 |
 | 3 | Claude 档位 | 探测命中哨兵 ⇒ 改道 claude，握手/事件/权限双向可用 |
 | 4 | 无 `--model` 但宿主答官方 provider | 透传，且探测帧不得外泄进官方流 |
 | 5 | 宿主不应答探测 | 超时 ⇒ 保守透传，argv 仍零改写 |
 | 6 | 官方 CLI 退出码 41 | 原样传播，不被 SIGTERM 吞成 143 |
 | 7 | 无原生 CLI | 退回全量桥接；参数翻译规则逐条成立 |
 | 8 | 探测回来非常规模型名 | 丢弃该值，claude 仍能启动 |
+| 9 | 默认文案统一源 | `get_models` 的两处合成兜底取同一句默认值（见 §二 组 9） |
 
 ## 一、测试构造（读结论前必须知道的边界）
 
@@ -134,12 +135,37 @@ shim 的 `FORCE_MODEL` 分支会往 `claudeArgs` 里塞 `--model`，于是第 8 
 
 ### 组 8 非常规模型名守卫
 
-宿主答 `model: '最强模型，世界最强模型'`（BYOK 的 `model` 列被本项目用作副标题文案，
-App 会原样回传该列）。观测到：claude 仍成功启动，且 `--argv` 里**没有** `--model`——
-非法值被丢弃（守卫是 `^[A-Za-z0-9._[\]:/-]{1,64}$`），回退到 `QODER_BRIDGE_MODEL` 或 claude 默认。
+宿主答 `model: 'Anthropic 最新模型，世界最强模型'`，观测到：claude 仍成功启动，且 `--argv` 里
+**没有** `--model`——非法值被丢弃（守卫是 `^[A-Za-z0-9._[\]:/-]{1,64}$`），
+回退到 `QODER_BRIDGE_MODEL` 或 claude 默认。
 
-含义：把「显示文案」借道「模型字段」是本项目自己的选择（渲染层副标题 = `${Anthropic|OpenAI} · <model列>`，
-没有独立字段），所以它必须自带防呆——否则一次文案改动会让 Claude 档位整体启动失败。
+为什么仍要这条守卫：D19 之后档位副标题走本地文案缓存，`model` 列回归**真实模型别名**
+（现网那行是 `fable[1m]`）。但 App 的 `resolveModel` 会把 `model` 列**原样回传**，
+而 BYOK 条目可能被用户或历史版本写成任何字符串——所以这个输入面天然不可信，
+守卫是防御性的，不能因为「我们现在只写别名」就撤。
+用它自己的默认副标题原文作输入，正是因为那串**带空格与全角逗号**，
+恰是 `CLAUDE_MODEL_RE` 必须拒绝的形态。
+
+### 组 9 默认文案的统一源（D19 追加）
+
+要求是「无论在哪里兜底都显示同一句话」，所以 shim 合成 `get_models` 的两个出口分别实测：
+
+- **A｜claude 回了 models 但条目自身无 `description`**（`MOCK_CLAUDE` 的 `initialize.models`
+  正是 `[{id, displayName}]`）→ 落到 `synthFor('get_models')` 的 map 分支，
+  观测 `description === DEFAULT_DESCRIPTION`；
+- **B｜claude 完全不回 models**（临时桩 claude 应答 `models: []`）→ 落到 `MODELS_FALLBACK`，
+  观测兜底条目的 `description` 与 `displayName` 分别是 `DEFAULT_DESCRIPTION` 与 `DEFAULT_TITLE`。
+
+两项都以 `native: ''` 强制走全量桥接——合成应答**只在这条路径发生**，透传路径永不走到。
+
+改造前 shim 里硬编码着两个**别的**串（`使用强大的 Claude Code 代理后端` / `Claude Code (bridge)`），
+降级路径下的模型描述与正常档位不一致，这就是「兜底面不统一」的实例。
+一处刻意的**不统一**保留在代码里：map 分支用 `m.description || DEFAULT_DESCRIPTION`——
+claude 自己给了描述就用它（那是上游信息，不是兜底），只有「没有描述」才落到统一默认值。
+
+同一真相源在另外三个出口的行为见 `2026-10-21-byok-tier-and-dynamic-text.md` §三·补。
+注意别混淆：`generate_session_title` 应答里的 `req.description` 是**宿主入参**（用来拟会话标题），
+与档位文案无关。
 
 ## 三、真 exe 差分（共存不变式的最硬判据）
 
@@ -166,6 +192,28 @@ B 经 shim 透传   ：exit code=0 frames=1
 **删除**（实测 run 后 payload 存在 = false）。A/B 共用一份，B 必然拿到不存在的路径 →
 `job_token_unavailable` → 41。那是**测试构造缺陷**，不是 shim 缺陷；两侧各自新建一份才对。
 真机场景每次 spawn 都由 SDK 新建 `%TEMP%\qoder-sdk-auth-XXXX\payload.json`，天然不冲突。
+
+另一条同样重要的观测（来自只握手不发消息的那次）：真 CLI 拿到 `initialize` 应答后**不会自己退出**——
+stdin 保持打开的 30s 内无任何后续帧，最终由脚本 SIGKILL 收尾（`exit=TIMEOUT`，帧总数 1）。
+据此推断它是常驻等下一条输入，直到 stdin EOF；所以只握手的取证必须主动 `stdin.end()` 或设超时，
+否则脚本会挂住。
+
+**推断项（未单独证实）**：这条与 §五「SDK 把 `result` 扣到 CLI 进程退出才浮出」看着是同一件事的两面
+——CLI 常驻 + result 延迟浮出，于是任何「固定时长后关流」的写法都会漏判。但 §五 那条是从
+SDK 侧行为观测的，两者没有在一次实验里同时测过，此处仅作方向性解释。
+
+## 三·补 官方 CLI 定位与递归防护
+
+差分与握手两次观测都定位到同一个路径，规则与 App 侧一致且**不能照抄 App 的
+`getBundledQoderCliPath()`**——它第一优先级就是 `QODER_CLI_PATH`，照抄会拿到 shim 自己：
+
+```
+native CLI = C:\Program Files\QwenWorkCN\1.3.2-26101704\resources\bin\qoderclicn.exe
+```
+
+定位顺序：`QODER_BRIDGE_QODERCLI` 覆盖 → `process.resourcesPath/bin` →
+`updater.cfg:currentVersion` 指针 → 枚举版本目录按语义化降序取最新。
+legacy 变体只在现代版缺失时才用（官方规则 `win32 && x64 && (build<17763 || 无 AVX2)` 仅作诊断）。
 
 ## 四、真实厂商 SDK 取证
 

@@ -196,7 +196,7 @@ spawn 前检测命令行总长度，超 8000 字符时记日志 `SPAWN-WARN` 并
 
 ## 验收标准
 
-- [x] 行为契约观测成立（8 组 42 项：三条分支 + 共存不变式 + 翻译回归，见 `docs/researches/2026-10-21-shim-behavior-contract.md` §二）。
+- [x] 行为契约观测成立（9 组 45 项：三条分支 + 共存不变式 + 翻译回归 + 默认文案统一源，见 `docs/researches/2026-10-21-shim-behavior-contract.md` §二）。
 - [x] 千问办公内发送任务：回复流式渲染，无报错弹窗（2026-08-21 14:18 首条 ledger `is_error: false` 会话落地，cost $0.0477，18063ms）。
 - [ ] 多轮对话上下文连续（第二轮的 `--resume` 命中同一 claude 会话）。
 - [ ] 子代理调用在 UI 显示为 Agent 卡片（Task→Agent 映射生效）。

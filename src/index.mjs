@@ -18,10 +18,13 @@ import { join, dirname } from 'node:path';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import {
-  DB_PATH, PROVIDER_MARKER, DEFAULT_TITLE, DEFAULT_ALIAS,
+  DB_PATH, PROVIDER_MARKER, DEFAULT_ALIAS,
   openDb, listTiers, ourTiers, createTier, updateTier, rememberIntent,
   removeTier, removeOurs, readExtra,
 } from './byok-store.mjs';
+// 默认标题/副标题只在这一个模块里定义（src/tier-text.mjs）。
+// apply 把它当作「兜底也显示同一句话」的源头：新建即写入意图源，重放时缺失即补值。
+import { DEFAULT_TITLE, DEFAULT_DESCRIPTION } from './tier-text.mjs';
 
 const OS = platform();
 // Windows 用 .mjs 文件（SDK 自动识别并调用 node）
@@ -232,9 +235,14 @@ async function reapplyLabels() {
     const done = await reapplyFromDb(DB_PATH);
     if (done.length) {
       console.log(`已重放档位文案 ${done.length} 条：`);
-      for (const d of done) console.log(`  ${d.key} → ${d.label ?? '(默认)'}${d.description ? ` / ${d.description}` : ''}`);
+      for (const d of done) {
+        console.log(`  ${d.key} → ${d.label ?? DEFAULT_TITLE} / ${d.description ?? DEFAULT_DESCRIPTION}`
+          + `${d.defaulted ? '（副标题取默认值）' : ''}`);
+      }
     } else {
-      console.log('（无档位记录自定义文案，下拉将显示 App 兜底标题）');
+      // 新语义下这只可能是「表里没有本项目的哨兵行」：
+      // 有哨兵行就一定有副标题（缺失即补默认值），不会再落回 App 的硬编码模板。
+      console.log('（没有本项目写入的档位可重放；pnpm apply 不带子命令时会新建一条）');
     }
   } catch (e) {
     const first = String(e?.message ?? e).split('\n')[0];
@@ -299,11 +307,14 @@ async function supplyTier(f) {
 async function writeLabelsFor(key, { label, description }, { strict = false } = {}) {
   if (label == null && description == null) return;
   try {
-    const { setModelLabels } = await import('./dynamic-text.mjs');
-    const r = setModelLabels(key, { label, description });
+    // 先记「意图源」再写缓存：rememberIntent 要求 key 在表里真实存在，
+    // 于是传错 key 时立刻失败，不会在 App 缓存里留下永远没人重放的孤儿键。
+    // （反过来先写缓存，缓存的 model.<错key>.* 会一直显示，而 --from-db 无从恢复。）
     const db = await openDb();
     try { rememberIntent(db, key, { label, description }); } finally { db.close(); }
-    console.log(`  文案：${label ?? '(沿用)'} / ${description ?? '(沿用)'}`
+    const { setModelLabels } = await import('./dynamic-text.mjs');
+    const r = setModelLabels(key, { label, description });
+    console.log(`  副标题：${description ?? DEFAULT_DESCRIPTION}`
       + `（缓存键 ${r.touched.join(', ')}，version=${r.version}）`);
   } catch (e) {
     if (strict) throw e;
@@ -324,8 +335,10 @@ const reportTier = (key, db) => {
   const row = listTiers(db).find((r) => r.key === key);
   if (!row) return;
   const extra = readExtra(row);
+  const desc = extra.description || DEFAULT_DESCRIPTION;
   console.log(`  标题            = ${extra.label ?? row.display_name}`);
-  console.log(`  model 列        = ${row.model}（下拉副标题的兜底来源）`);
+  console.log(`  副标题          = ${desc}${extra.description ? '' : '（默认值，tier-text.mjs）'}`);
+  console.log(`  model 列        = ${row.model}（真实别名；App 兜底模板才读它，我们不让它生效）`);
   console.log(`  provider        = ${row.provider}   ← shim 的路由哨兵，勿改`);
 };
 
@@ -336,10 +349,18 @@ async function showTiers() {
     if (rows.length === 0) { console.log(`(byok_custom_models 为空)\n数据库: ${DB_PATH}`); return; }
     console.log(`数据库 ${DB_PATH}`);
     for (const r of rows) {
-      const ours = r.provider === PROVIDER_MARKER ? '  ← 本项目' : '';
+      const ours = r.provider === PROVIDER_MARKER;
       const extra = readExtra(r);
-      console.log(`${r.key}  ${extra.label ?? r.display_name}  model=${r.model}  style=${r.style}  provider=${r.provider}${ours}`);
-      if (extra.description) console.log(`    副标题文案: ${extra.description}`);
+      console.log(`${r.key}  ${extra.label ?? r.display_name}  model=${r.model}  style=${r.style}`
+        + `  provider=${r.provider}${ours ? '  ← 本项目' : ''}`);
+      // 本项目档位：副标题永不为空（缺失即默认值），显示时要标明来源，
+      // 否则「它到底是意图源里的还是我们补的」这个问题在现场无法回答
+      if (ours) {
+        console.log(`    副标题文案: ${extra.description || DEFAULT_DESCRIPTION}`
+          + `${extra.description ? '' : '（取 tier-text 默认值）'}`);
+      } else if (extra.description) {
+        console.log(`    副标题文案: ${extra.description}`);
+      }
     }
   } finally { db.close(); }
 }
@@ -379,7 +400,10 @@ const cmdLabels = async (f) => {
   if (f['from-db']) {
     const done = await reapplyFromDb(DB_PATH);
     console.log(`从 DB 意图源重放 ${done.length} 条文案到 ${CACHE_FILE}`);
-    for (const d of done) console.log(`  ${d.key} → 标题=${d.label} 副标题=${d.description}`);
+      for (const d of done) {
+        console.log(`  ${d.key} → 标题=${d.label ?? DEFAULT_TITLE}`
+          + ` 副标题=${d.description ?? DEFAULT_DESCRIPTION}${d.defaulted ? '（取默认值）' : ''}`);
+      }
     return;
   }
   const key = f.key;
@@ -444,14 +468,48 @@ const cmdUnapply = async (f) => {
   console.log(`已撤销 ${removed} 项，重启千问办公恢复原引擎。`);
 };
 
-const parseFlags = (argv) => {
+// 旗标表：显式区分「取值」与「开关」，否则解析只能靠猜——猜错的代价是静默改坏数据。
+// 真机实测踩过：`--description Anthropic 最新模型，世界最强模型`（忘了引号）被 shell 切成三个
+// argv，旧解析器取走 "Anthropic" 当值、把剩下两个词**无声丢掉**，命令还报告写入成功。
+// 文案含空格是常态（本项目默认副标题就带逗号空格），所以这里必须报错而不是兜出半个值。
+const VALUE_FLAGS = new Set([
+  'model', 'name', 'displayName', 'label', 'description', 'subtitle', 'api-key',
+  'style', 'url', 'key', 'max-input', 'max-output', 'claude-model',
+]);
+const BOOL_FLAGS = new Set(['from-db', 'vl', 'show', 'keep-tier']);
+
+const parseFlags = (argv, { firstPositionalIsSub = false } = {}) => {
   const out = {};
+  const orphans = [];   // 既不是旗标、也没被任何旗标吃掉的裸词
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (!a.startsWith('--')) continue;
+    if (!a.startsWith('--')) {
+      if (firstPositionalIsSub && Object.keys(out).length === 0 && orphans.length === 0) {
+        out.__sub = a;   // 只有最前面的裸词才是子命令
+        continue;
+      }
+      orphans.push(a);
+      continue;
+    }
     const k = a.slice(2);
-    if (i + 1 < argv.length && !argv[i + 1].startsWith('--')) out[k] = argv[++i];
-    else out[k] = true;
+    const next = argv[i + 1];
+    const nextIsBare = next != null && !next.startsWith('--');
+    if (BOOL_FLAGS.has(k)) { out[k] = true; continue; }
+    if (VALUE_FLAGS.has(k)) {
+      if (!nextIsBare) throw new Error(`--${k} 需要一个值（给了旗标却没跟上内容）`);
+      out[k] = next;
+      i++;
+      // 值后面若还跟着裸词，交给主循环的裸词分支收进 orphans：
+      // 99% 是「值里有空格却没加引号」被 shell 切开的残段，这里不做前瞻（前瞻会重复登记同一个词）。
+      continue;
+    }
+    // 未知旗标：不猜它的值，直接拒绝——拼错的旗标静默生效比报错危险得多
+    throw new Error(`未知旗标 --${k}（可用：${[...VALUE_FLAGS].join(' / ')}；开关：${[...BOOL_FLAGS].join(' / ')}）`);
+  }
+  if (orphans.length) {
+    throw new Error(`无法理解的参数：${orphans.map((o) => JSON.stringify(o)).join(' ')}\n`
+      + '（多半是值里有空格却忘了引号——如 --description "Anthropic 最新模型，世界最强模型"；'
+      + '子命令要写在旗标之前，如 pnpm apply list）');
   }
   return out;
 };
@@ -472,10 +530,20 @@ const usage = () => {
 路由哨兵 provider: ${PROVIDER_MARKER}`);
 };
 
-const [, , cmd, ...rest] = process.argv;
-const sub = !rest[0]?.startsWith('--') ? rest[0] : null;
-const flags = parseFlags(rest);
+// 解析整体放进 try：parseFlags 现在会主动抛错（未知旗标/缺值/被空格切开的值），
+// 必须走统一的「失败: …」出口并 exit 1，而不是抛裸栈。
+let cmd, rest, sub, flags;
 try {
+// npm/pnpm 的老式参数分隔符 `--` 会原样留在 argv 里：`pnpm apply -- list` → ['--','list']。
+// 不剔掉它，'--'.startsWith('--') 会让子命令判定失败 ⇒ 一次「查询」被当成完整 apply 执行
+// （写注册表 + 改档位）。命令面绝不能因为包管理器的传参习惯而升格成写操作。
+  cmd = process.argv[2];
+  // npm/pnpm 的老式参数分隔符 `--` 会原样留在 argv 里：`pnpm apply -- list` → ['--','list']。
+  // 不剔掉它，'--'.startsWith('--') 会让子命令判定失败 ⇒ 一次「查询」被当成完整 apply 执行
+  // （写注册表 + 改档位）。命令面绝不能因为包管理器的传参习惯而升格成写操作。
+  rest = process.argv.slice(3).filter((a) => a !== '--');
+  flags = parseFlags(rest, { firstPositionalIsSub: true });
+  sub = flags.__sub ?? null;
   if (cmd === 'apply') {
     // --claude-model 是「强制 claude 侧模型」的历史挂点，与档位 model 列**不是一回事**：
     // 它注册 QODER_BRIDGE_MODEL，shim 会用它覆盖探测到的模型名（见 bridge-shim.mjs FORCE_MODEL）。

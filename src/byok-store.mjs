@@ -28,10 +28,11 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir, platform } from 'node:os';
 import { randomBytes } from 'node:crypto';
+import { DEFAULT_TITLE, DEFAULT_DESCRIPTION } from './tier-text.mjs';
 
 export const PROVIDER_MARKER = process.env.QODER_BRIDGE_BYOK_PROVIDER ?? 'claude-bridge';
-// 新建档位的默认值：别名 opus 任何 Claude 登录态都吃；标题可被 --name 覆盖
-export const DEFAULT_TITLE = process.env.QODER_BRIDGE_BYOK_NAME ?? 'Claude';
+// 默认标题/副标题的定义**不在这里**，在 src/tier-text.mjs（唯一真相源）。
+// 新建档位的默认别名：opus 任何 Claude 登录态都吃。
 export const DEFAULT_ALIAS = 'opus';
 
 // App 的 userData 根：Windows %APPDATA%\QwenWorkCN / macOS ~/Library/Application Support/QwenWorkCN
@@ -80,10 +81,11 @@ export function ourTiers(db) {
 }
 
 /** 新建一条档位；返回 key */
-export function createTier(db, { alias, title, apiKey, style, url, isVl, maxInput, maxOutput }) {
+export function createTier(db, { alias, title, apiKey, style, url, isVl, maxInput, maxOutput, description }) {
   const key = newKey();
   const now = Date.now();
   const st = style ?? 'anthropic';
+  const nextTitle = title ?? DEFAULT_TITLE;
   db.prepare(`
     INSERT INTO byok_custom_models
       (key, source, display_name, provider, type, url, style, model, format,
@@ -91,11 +93,14 @@ export function createTier(db, { alias, title, apiKey, style, url, isVl, maxInpu
        encrypted_parameters, extra_params, created_at, updated_at)
     VALUES (?, 'byok', ?, ?, 'claude', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
   `).run(
-    key, title ?? DEFAULT_TITLE, PROVIDER_MARKER, url ?? null, st,
+    key, nextTitle, PROVIDER_MARKER, url ?? null, st,
     alias ?? DEFAULT_ALIAS, st, isVl ? 1 : 0,
     maxInput ?? 200000, maxOutput ?? 32000,
     JSON.stringify({ api_key: encodeParam(apiKey ?? 'placeholder') }),
-    JSON.stringify({ displayName: title ?? DEFAULT_TITLE }),
+    // 意图源**建好就带副标题**：App 的 BYOK 副标题是硬编码模板
+    // `${Anthropic|OpenAI} · <model列>`，只要 description 为空就轮到它出场。
+    // 我们的档位不允许出现那种默认显示，故此处不留空。
+    JSON.stringify({ displayName: nextTitle, description: description ?? DEFAULT_DESCRIPTION }),
     now, now,
   );
   return key;
@@ -117,6 +122,12 @@ export function updateTier(db, key, { title, alias, label, description, style } 
   extra.displayName = nextTitle;
   if (label != null) extra.label = label;
   if (description != null) extra.description = description;
+  // 意图源也**不允许副标题为空**（只对本项目的哨兵行；用户自配的 BYOK 不替它决定显示）：
+  // 空值会让 App 下次刷新文案缓存后落回硬编码模板 `Anthropic · <model列>`。
+  if (row.provider === PROVIDER_MARKER && !extra.description) extra.description = DEFAULT_DESCRIPTION;
+  // 标题不留空却不需要默认值：App 的 getModelLabel 最后一级兜底是 extraParams.displayName，
+  // 而那一列我们无论如何都会写（updateTier 总带 nextTitle），所以标题天然有值。
+  // 副标题没有对应的「必然存在的列」——App 只读 model 列拼硬编码模板，故必须显式填。
   db.prepare(`update byok_custom_models
     set display_name=?, model=?, style=?, format=?, extra_params=?, updated_at=? where key=?`)
     .run(

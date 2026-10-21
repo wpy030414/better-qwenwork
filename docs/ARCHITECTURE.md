@@ -189,12 +189,12 @@ src/bridge-shim-wrapper.sh（macOS 专用）
 
 | 结论 | 载体 |
 |---|---|
-| 三分支行为契约 42 项（argv 零改写 / env 增删 / 探测帧不外泄 / 退出码 41 传播 / 翻译回归 / 模型名守卫） | [researches/2026-10-21-shim-behavior-contract.md](researches/2026-10-21-shim-behavior-contract.md) §二 |
+| 三分支行为契约 45 项（argv 零改写 / env 增删 / 探测帧不外泄 / 退出码 41 传播 / 翻译回归 / 模型名守卫 / 默认文案统一源） | [researches/2026-10-21-shim-behavior-contract.md](researches/2026-10-21-shim-behavior-contract.md) §二 |
 | 真实 `qoderclicn.exe` 差分：直连 vs 经 shim 透传帧序列同构、退出码一致、无 `sdk_invalid_args` | 同上 §三 |
 | 真实厂商 SDK 1.0.53 认下探测帧并回调宿主 `resolveModel`（7 项） | 同上 §四 |
 | 真实 claude.exe 双分支 + 计费台账（4 条「共存成功」记录，$0.009~0.073/次） | 同上 §五 |
 | 真机 UI 闭环（下拉 4 档、点选被接受、路由 `qoder-cli`+`local-byok`） | 同上 §六 与本文「已知风险」小节 |
-| 档位字段约束 + 本地文案表 15 项读写观测 + 两个实测数据缺陷 | [researches/2026-10-21-byok-tier-and-dynamic-text.md](researches/2026-10-21-byok-tier-and-dynamic-text.md) |
+| 档位字段约束 + 本地文案表 18 项读写观测 + 三个实测数据缺陷 + 默认文案四出口同值 | [researches/2026-10-21-byok-tier-and-dynamic-text.md](researches/2026-10-21-byok-tier-and-dynamic-text.md) |
 
 上述观测**可复现**：驱动脚本留在 `.analysis/legacy-verification/`（gitignore 的取证工具区，
 与仓库产品代码物理隔离）。厂商 SDK 由 App 安装目录只读复制暂存到 `.analysis/vendor-sdk`，

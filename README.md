@@ -21,7 +21,7 @@
   - 取证推翻 v2 前提：官方档位走 ACP 引擎，不经 `QODER_CLI_PATH`（`docs/researches/2026-10-20-engine-harness-routing.md`）。
   - shim 改为三分支：`passthrough`（默认，原样交给官方 CLI）/ `probe`（问宿主 `get_model_policy`）/ `claude`（仅 Claude 档位）。
   - Claude 档位用 App 自己的 BYOK 机制供给（`byok_custom_models` 表 + `ALLOW_CUSTOM_BYOK` env 开门），不碰 `app.asar`、不碰 UI。
-  - 验证：8 组 42 项行为契约观测 + 真 exe 差分 + 真实厂商 SDK + 真实 claude.exe 双分支，全部成立。结论已转写为研究成果（见下文「验证与复现」），代码库内不保留验证代码。
+  - 验证：9 组 45 项行为契约观测 + 真 exe 差分 + 真实厂商 SDK + 真实 claude.exe 双分支，全部成立。结论已转写为研究成果（见下文「验证与复现」），代码库内不保留验证代码。
 - 人工闭环：已在千问办公 UI 里点选「Claude」档位发消息跑通（2026-10-20，见下文「怎么确认生效」）。
 
 ## 如何安装和运行
@@ -45,30 +45,50 @@ pnpm install
 #    档位写进 App 自己的 byok_custom_models 表，provider = 哨兵 claude-bridge
 pnpm apply
 
-# 想指定别名/标题/文案：
-pnpm apply --model opus --name Claude
-pnpm apply --model fable[1m] --name Fable5.5 --description 最强模型，世界最强模型
-
 # 3. 重启千问办公（必须完全退出所有 QwenWorkCN 进程）
 #    官方档位（flash/pro 等）继续走官方服务，行为与没装本项目时逐帧一致；
 #    在模型下拉的「我的模型」分组里选「Claude」，那一轮才改道 Claude Code。
 ```
 
+想指定别名/标题/文案，给 `apply` 加旗标。**含空格的值必须加引号**——shell 会把
+`Anthropic 最新模型，世界最强模型` 切成多个参数，脚本会拒绝这种残段并报错退出
+（旧版会静默截断成 `Anthropic` 还报告成功，那是数据损坏而不是失败）：
+
+```bash
+pnpm apply --model opus --name Claude
+pnpm apply --model "fable[1m]" --name Fable5.5 --description "Anthropic 最新模型，世界最强模型"
+```
+
+> 别名含 `[` `]` 时也建议加引号：实测 bash 会原样传递 `fable[1m]`，但 zsh 对未匹配的
+> glob 默认直接报错（`no matches found`）；加引号可让两种 shell 行为一致。
+> 拼错旗标（`--descriptio`）同样会直接报错，不会被当成开关静默生效。
+
+副标题有一个**统一默认值**（`src/tier-text.mjs` 的 `DEFAULT_DESCRIPTION`）：新建档位、
+云端覆盖后的重放、shim 合成的模型列表，四个出口都取这一句，不给 App 的硬编码模板
+`Anthropic · <model列>` 留生效机会。只想改文案而不改代码，可用环境变量
+`QODER_BRIDGE_BYOK_DESCRIPTION`。
+
 撤销（恢复原引擎 + 清掉档位）：
 
 ```bash
-pnpm unapply          # 撤销 QODER_CLI_PATH / QODERCLI_PATH / ALLOW_CUSTOM_BYOK，
-                      # 并默认清掉本项目写入的档位（留档位会被占位 api_key 直连而 403）
+pnpm unapply          # 撤销 QODER_CLI_PATH / QODERCLI_PATH / ALLOW_CUSTOM_BYOK / QODER_BRIDGE_MODEL，
+                      # 并默认清掉本项目写入的档位——留档位会被占位 api_key 直连而 403
+pnpm unapply --keep-tier   # 只撤注入、保留档位（调试用）
 ```
 
-其他子命令：
+子命令（查看与微调，都不碰环境变量）：
 
 ```bash
-pnpm apply -- list              # 看 App 的自定义档位，确认哨兵行在不在
-pnpm apply -- labels --key byok-xxxx --label 标题 --description 副标题
-pnpm apply -- labels --from-db  # 云端覆盖文案缓存后，从 DB 意图源重放
-pnpm apply -- prune             # 只删本项目写入的哨兵条目，不碰用户自配的 BYOK
+pnpm apply list                # 看 App 的自定义档位，确认哨兵行在不在
+pnpm apply labels --key byok-xxxx                     # 查该档位当前文案
+pnpm apply labels --key byok-xxxx --label 标题 --description 副标题
+pnpm apply labels --from-db    # 云端覆盖文案缓存后，从 DB 意图源重放
+pnpm apply prune               # 只删本项目写入的哨兵条目，不碰用户自配的 BYOK
 ```
+
+> `pnpm` 传子命令用 `pnpm apply list` 即可（本仓库的 script 是 `node src/index.mjs apply`，
+> 参数天然接在后面）。写成 `pnpm apply -- list` 也认：脚本会剔掉包管理器留下的 `--` 分隔符，
+> 不会因此把一次查询误当成完整安装。
 
 ### 怎么确认生效
 
@@ -87,18 +107,18 @@ pnpm apply -- prune             # 只删本项目写入的哨兵条目，不碰�
 
 | 结论 | 记录 |
 |---|---|
-| 三分支行为契约 42 项（argv 零改写 / env 增删 / 探测帧不外泄 / 退出码 41 / 翻译回归 / 模型名守卫） | `2026-10-21-shim-behavior-contract.md` §二 |
+| 三分支行为契约 45 项（argv 零改写 / env 增删 / 探测帧不外泄 / 退出码 41 / 翻译回归 / 模型名守卫 / 默认文案统一源） | `2026-10-21-shim-behavior-contract.md` §二 |
 | 真实 `qoderclicn.exe` 差分：装了与没装逐帧同构 | 同上 §三 |
 | 真实厂商 SDK 认下探测帧并回调 `resolveModel`（7 项） | 同上 §四 |
 | 真实 claude.exe 双分支 + 计费台账（4 条「共存成功」，$0.009~0.073/次） | 同上 §五 |
 | 真机 UI 闭环 | 同上 §六 |
-| 档位字段约束 + 本地文案表 15 项观测 | `2026-10-21-byok-tier-and-dynamic-text.md` |
+| 档位字段约束 + 本地文案表 18 项观测 + 默认文案四出口同值 | `2026-10-21-byok-tier-and-dynamic-text.md` |
 
 观测**可复现**，驱动脚本与替身在 `.analysis/legacy-verification/`（gitignore 的取证工具区）：
 
 ```bash
-node .analysis/legacy-verification/bridge-shim.test.mjs   # 密闭层 42 项，不耗额度
-node .analysis/legacy-verification/dynamic-text.test.mjs  # 文案层 15 项，只用临时目录
+node .analysis/legacy-verification/bridge-shim.test.mjs   # 密闭层 45 项，不耗额度
+node .analysis/legacy-verification/dynamic-text.test.mjs  # 文案层 18 项，只用临时目录
 node .analysis/legacy-verification/e2e-diff.mjs           # 真实官方 CLI 差分，不耗额度
 node .analysis/legacy-verification/e2e-sdk.mjs            # 真实厂商 SDK，7 项，不耗额度
 node .analysis/legacy-verification/e2e-real.mjs           # 真实 claude 双分支，会产生计费
@@ -115,6 +135,8 @@ node .analysis/legacy-verification/e2e-real.mjs           # 真实 claude 双分
 | `QODER_BRIDGE_CLAUDE` | 覆盖 `claude` 可执行文件路径（默认 `%APPDATA%\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe`，因千问办公进程的 `PATH` 通常不含 npm 全局目录） |
 | `QODER_BRIDGE_QODERCLI` | 覆盖**官方原生 CLI** 路径（透传分支用）；设为**空串** = 强制无原生 CLI，退回 v2 式全量桥接（测试用） |
 | `QODER_BRIDGE_BYOK_PROVIDER` | 路由哨兵值，默认 `claude-bridge`；必须与 `pnpm apply` 写入的 `provider` 一致 |
+| `QODER_BRIDGE_BYOK_DESCRIPTION` | 档位**默认副标题**的唯一真相源（`src/tier-text.mjs`），默认 `Anthropic 最新模型，世界最强模型`；改它不需动代码，四个出口（新建档位／更新填空／云端覆盖后重放／shim 合成模型列表）一起变 |
+| `QODER_BRIDGE_BYOK_NAME` | 档位**默认标题**，默认 `Fable5.5`；同上单源，shim 的兜底模型条目也用这个值 |
 | `QODER_BRIDGE_PROBE_TIMEOUT_MS` | `get_model_policy` 探测超时（默认 6000）；超时保守走透传，宁可让这一轮走官方也不破坏官方链路 |
 | `QODER_BRIDGE_MODEL` | 强制指定 claude 模型别名（默认用探测到的模型名） |
 | `QODER_BRIDGE_NODE` | **macOS 专用**：覆盖 `node` 路径（默认 `/opt/homebrew/bin/node`） |

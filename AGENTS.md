@@ -23,7 +23,8 @@ src/
 ├── native-cli.mjs           # 定位官方 qoderclicn.exe（供透传）+ 递归防护 env 清理
 ├── index.mjs                # pnpm apply / unapply：挂点 + 开关 + 档位 + 文案（唯一命令面，跨平台）
 ├── byok-store.mjs           # byok_custom_models 数据层（无命令面；node:sqlite 开库时动态引入）
-├── dynamic-text.mjs         # 档位标题/副标题：本地文案缓存读写 + 云端覆盖后从意图源重放
+├── tier-text.mjs            # 档位默认标题/副标题的唯一真相源（零依赖，shim 也可安全引入）
+├── dynamic-text.mjs         # 档位文案：本地文案缓存读写 + 云端覆盖后从意图源重放（缺失补默认值）
 ├── bridge-shim-wrapper.sh   # macOS shell wrapper（绕过 PATH 限制）
 └── logs/                    # 运行时日志（.gitignore 已排除）
 

@@ -27,6 +27,9 @@ import { join, dirname, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir, platform, tmpdir } from 'node:os';
 import { findNativeCli, passthroughEnv } from './native-cli.mjs';
+// 档位显示文案的唯一真相源（src/tier-text.mjs）：这里取两处兜底，
+// 于是「默认描述」在 DB 意图源 / 本地文案缓存 / get_models 应答 / 会话标题 四个出口同值。
+import { DEFAULT_TITLE, DEFAULT_DESCRIPTION } from './tier-text.mjs';
 
 // ---------- 配置 ----------
 const DEFAULT_CLAUDE_BIN = (() => {
@@ -122,8 +125,8 @@ const INIT_RESPONSE_FALLBACK = () => ({
 });
 const MODELS_FALLBACK = () => ({
   models: [{
-    value: 'claude-bridge', displayName: 'Claude',
-    description: '使用强大的 Claude Code 代理后端', modelId: 'claude-bridge',
+    value: 'claude-bridge', displayName: DEFAULT_TITLE,
+    description: DEFAULT_DESCRIPTION, modelId: 'claude-bridge',
     source: 'system', isDefault: true,
     // Claude 全系列支持 vision；千问办公前端按 is_vl / capabilities.vision 放行图片
     is_vl: true, capabilities: { vision: true },
@@ -524,7 +527,9 @@ function runSession(parsed, sinkRef) {
           return { models: claudeModels.map((m, i) => ({
             value: m.value ?? m.id ?? String(m),
             displayName: m.displayName ?? m.value ?? m.id ?? String(m),
-            description: m.description ?? 'Claude Code (bridge)',
+            // claude 自己给了描述就用它（那不是兜底，是上游信息）；
+            // 只有缺描述时才落到统一真相源，保证四个出口的兜底同值。
+            description: m.description || DEFAULT_DESCRIPTION,
             modelId: m.modelId ?? m.id ?? m.value ?? String(m),
             source: 'system', isDefault: m.isDefault ?? i === 0,
             is_vl: true, capabilities: { vision: true },

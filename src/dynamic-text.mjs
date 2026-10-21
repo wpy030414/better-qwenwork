@@ -20,6 +20,7 @@
 //   本模块只在已存在该文件时补写键值，不凭空造文件。
 import { readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
+import { DEFAULT_DESCRIPTION } from './tier-text.mjs';
 
 const DATA_ROOT = join(
   process.platform === 'win32' ? process.env.APPDATA : process.platform === 'darwin'
@@ -77,25 +78,34 @@ export function getModelLabels(key) {
 // 所以恢复只需一条命令：pnpm apply labels --from-db
 // 开库交给 src/byok-store.mjs（唯一的数据层，含 node:sqlite 的动态引入与平台路径判定），
 // 故本模块自身不静态依赖 sqlite：老版本 Node 上「写文案」这件事降级即可。
+//
+// 副标题缺省策略（src/tier-text.mjs 是唯一真相源）：
+//   · provider === 哨兵（本项目写的档位）：description 缺失就补默认值。
+//     绝不允许它落回 App 的硬编码模板 `${Anthropic|OpenAI} · <model列>`——
+//     那模板我们改不了，唯一的对抗方式就是让 dynamicText 这条通路永远有值。
+//   · 其他 provider（用户自己配的 BYOK）：整行跳过，不替别人的档位决定显示文案。
+//   · 显式写过的自定义文案永远优先，默认值只填空、不覆盖。
 export async function reapplyFromDb(dbPath) {
-  const { openDb } = await import('./byok-store.mjs');
+  const { openDb, PROVIDER_MARKER } = await import('./byok-store.mjs');
   const db = await openDb(dbPath, { readOnly: true });
   let rows;
   try {
-    rows = db.prepare('select key, display_name, extra_params from byok_custom_models').all();
+    rows = db.prepare('select key, display_name, provider, extra_params from byok_custom_models').all();
   } finally { db.close(); }
   const done = [];
   for (const r of rows) {
+    if (r.provider !== PROVIDER_MARKER) continue;
     let extra = {};
     try { extra = JSON.parse(r.extra_params || '{}'); } catch {}
-    // 只重放**显式记录过意图**的行：不给没自定义过文案的档位凭空写键，
-    // 否则会把「App 兜底显示」也固化成我们的值，掩盖真实来源。
     const label = typeof extra.label === 'string' && extra.label ? extra.label : null;
-    const description = typeof extra.description === 'string' && extra.description ? extra.description : null;
+    // 副标题：行内意图优先，缺失填默认值（本项目的档位不留「App 兜底」这个状态）
+    const description = typeof extra.description === 'string' && extra.description
+      ? extra.description
+      : DEFAULT_DESCRIPTION;
     if (label == null && description == null) continue;
     try {
       setModelLabels(r.key, { label, description });
-      done.push({ key: r.key, label, description });
+      done.push({ key: r.key, label, description, defaulted: extra.description == null });
     } catch (e) {
       console.log(`  跳过 ${r.key}：${String(e.message ?? e).split('\n')[0]}`);
     }
